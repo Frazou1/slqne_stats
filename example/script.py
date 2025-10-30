@@ -7,7 +7,6 @@ import paho.mqtt.client as mqtt
 from zoneinfo import ZoneInfo
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
 
 LOCAL_TZ = "America/Toronto"
 
@@ -37,15 +36,45 @@ def get_html_selenium(url: str) -> str:
     driver.get(url)
     time.sleep(4)
     html = driver.page_source
-    print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
     driver.quit()
+    print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
     return html
 
 # ===============================================================
 # 🧠 Parsing des sections
 # ===============================================================
+def parse_standings_multi_division(html: str) -> List[Dict]:
+    """Parse les standings Spordle avec plusieurs divisions (ex: Est/Ouest)."""
+    soup = BeautifulSoup(html, "html.parser")
+    divisions = []
+    
+    headers = soup.find_all(["h2", "h3"], string=re.compile(r"Division", re.I))
+    if not headers:
+        print("[WARN] Aucune division détectée, tentative de lecture unique…")
+        table = soup.find("table")
+        return parse_table_generic(str(table)) if table else []
+    
+    for header in headers:
+        division_name = header.get_text(strip=True)
+        table = header.find_next("table")
+        if not table:
+            continue
+        
+        headers_cols = [th.get_text(strip=True) for th in table.select("thead th")]
+        rows = []
+        for tr in table.select("tbody tr"):
+            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(tds) >= len(headers_cols):
+                row = dict(zip(headers_cols, tds))
+                row["division"] = division_name
+                rows.append(row)
+        print(f"[DEBUG] {len(rows)} lignes extraites pour {division_name}")
+        divisions.extend(rows)
+    
+    print(f"[DEBUG] Total {len(divisions)} lignes de standings multi-division extraites")
+    return divisions
+
 def parse_table_generic(html: str) -> List[Dict]:
-    """Utilisée pour standings ou playerstats."""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
@@ -66,7 +95,6 @@ def detect_last_game(html: str) -> Optional[Dict]:
     """Recherche un tableau ou bloc contenant les derniers matchs."""
     soup = BeautifulSoup(html, "html.parser")
 
-    # --- Bloc 1 : table id="recentGames"
     tbl = soup.find("table", {"id": "recentGames"})
     if tbl:
         row = tbl.find("tr")
@@ -80,7 +108,6 @@ def detect_last_game(html: str) -> Optional[Dict]:
                 "result": cols[3] if len(cols) > 3 else ""
             }
 
-    # --- Bloc 2 : recherche libre d’un div “Derniers matchs”
     candidates = soup.find_all(text=re.compile(r"(Derniers matchs|Recent Games)", re.I))
     for c in candidates:
         table = c.find_parent("div").find("table") if c.find_parent("div") else None
@@ -103,7 +130,6 @@ def detect_last_game(html: str) -> Optional[Dict]:
 # 🚀 MQTT
 # ===============================================================
 def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
-    """Publie un capteur MQTT avec MQTT Discovery."""
     sensor_id = f"{entity_prefix}_{slug}_{label}"
     base = f"{discovery_prefix}/sensor/{sensor_id}"
     cfg_topic = f"{base}/config"
@@ -163,7 +189,7 @@ def main():
             # 1️⃣ Classement
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
-            standings = parse_table_generic(html_standings)
+            standings = parse_standings_multi_division(html_standings)
 
             mqtt_publish(
                 client, args.discovery_prefix, args.entity_prefix, slug,
@@ -184,7 +210,7 @@ def main():
                 {"players": players, "updated": now_local_iso()}
             )
 
-            # 3️⃣ Dernier match (si dispo)
+            # 3️⃣ Dernier match
             last_game = detect_last_game(html_standings)
             if last_game:
                 mqtt_publish(
