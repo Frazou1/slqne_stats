@@ -47,7 +47,7 @@ echo "$TEAMS_JSON" | jq -r '.[] | "- \(.name) -> \(.team_url)"'
 # --- Boucle principale ---
 while true; do
   echo "[INFO] Exécution du script Python SLQNE…"
-  python3 /app/script.py \
+  python3 /script.py \
     --teams-json "$TEAMS_JSON" \
     --entity_prefix "$ENTITY_PREFIX" \
     --mqtt_host "$MQTT_HOST" \
