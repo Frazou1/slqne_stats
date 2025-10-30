@@ -44,9 +44,11 @@ def get_html_selenium(url: str) -> str:
 # 🧠 Parsing des sections
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
-    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite."""
+    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite.
+       Ignore les tableaux dupliqués ou agrégés (mobile)."""
     soup = BeautifulSoup(html, "html.parser")
     all_rows = []
+    seen_teams = set()
     tables = soup.find_all("table")
 
     if not tables:
@@ -55,8 +57,7 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
 
     print(f"[DEBUG] {len(tables)} tables trouvées dans la page standings")
 
-    for table in tables:
-        # Recherche du titre de division juste avant la table
+    for i, table in enumerate(tables, start=1):
         division_name = "Division inconnue"
         prev = table.find_previous(string=re.compile(r"Division", re.I))
         if prev:
@@ -69,12 +70,19 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
             if len(tds) >= len(headers):
                 row = dict(zip(headers, tds))
                 row["division"] = division_name
-                rows.append(row)
+                team_name = row.get("Équipe") or row.get("Equipe") or ""
+                if team_name and team_name not in seen_teams:
+                    rows.append(row)
+                    seen_teams.add(team_name)
+
+        if len(rows) > 15:
+            print(f"[DEBUG] Table {i} ignorée ({len(rows)} lignes, probable tableau global).")
+            continue
 
         print(f"[DEBUG] {len(rows)} lignes extraites pour {division_name}")
         all_rows.extend(rows)
 
-    print(f"[DEBUG] Total {len(all_rows)} lignes multi-division extraites")
+    print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites")
     return all_rows
 
 def parse_table_generic(html: str) -> List[Dict]:
@@ -95,9 +103,7 @@ def parse_table_generic(html: str) -> List[Dict]:
     return rows
 
 def detect_last_game(html: str) -> Optional[Dict]:
-    """Recherche un tableau ou bloc contenant les derniers matchs."""
     soup = BeautifulSoup(html, "html.parser")
-
     tbl = soup.find("table", {"id": "recentGames"})
     if tbl:
         row = tbl.find("tr")
@@ -110,22 +116,6 @@ def detect_last_game(html: str) -> Optional[Dict]:
                 "home": cols[2] if len(cols) > 2 else "",
                 "result": cols[3] if len(cols) > 3 else ""
             }
-
-    candidates = soup.find_all(text=re.compile(r"(Derniers matchs|Recent Games)", re.I))
-    for c in candidates:
-        table = c.find_parent("div").find("table") if c.find_parent("div") else None
-        if table:
-            row = table.find("tr")
-            if row:
-                cols = [td.get_text(strip=True) for td in row.find_all("td")]
-                print(f"[DEBUG] Dernier match (bloc libre): {cols}")
-                return {
-                    "date": cols[0] if len(cols) > 0 else "",
-                    "visitor": cols[1] if len(cols) > 1 else "",
-                    "home": cols[2] if len(cols) > 2 else "",
-                    "result": cols[3] if len(cols) > 3 else ""
-                }
-
     print("[WARN] Aucun dernier match détecté dans le HTML.")
     return None
 
@@ -189,7 +179,6 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
-            # 1️⃣ Classement
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
@@ -201,7 +190,6 @@ def main():
                 {"standings": standings, "updated": now_local_iso()}
             )
 
-            # 2️⃣ Stats joueurs
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players = parse_table_generic(html_players)
@@ -213,7 +201,6 @@ def main():
                 {"players": players, "updated": now_local_iso()}
             )
 
-            # 3️⃣ Dernier match
             last_game = detect_last_game(html_standings)
             if last_game:
                 mqtt_publish(
