@@ -1,9 +1,10 @@
-# https://developers.home-assistant.io/docs/add-ons/configuration#add-on-config
-name: RSEQ Team Calendar
-version: "1.3.6"
-slug: rseq_team_calendar
-description: "Scrape le calendrier RSEQ d'une équipe ou de plusieurs équipes et publie le prochain match via MQTT (optionnel: création d'événements HA)."
-url: "https://github.com/Frazou1/rseq_calendar"
+name: SLQNE Hockey Stats
+version: "1.0.0"
+slug: slqne_hockey_stats
+description: >
+  Récupère et publie via MQTT les statistiques de la SLQNE (classements, joueurs, gardiens)
+  à partir du site Spordle (ligue de hockey mineur Capitale-Nationale).
+url: "https://github.com/Frazou1/slqne_hockey"
 arch:
   - armhf
   - armv7
@@ -15,40 +16,34 @@ map:
   - share:rw
 
 options:
-  # ----- NOUVEAU (facultatif) : multi-équipes -----
-  entity_prefix: "rseq"
-  teams: []
-  # ----- Mode legacy : une seule équipe -----
-  team_url: ""
+  entity_prefix: "slqne"
+  teams:
+    - name: "Hayden Hockey"
+      league_id: "bf27e08e-8d52-41be-a097-a6cf79f4466a"
+      schedule_id: "183363"
+    - name: "Loik Hockey"
+      league_id: "13c38dd1-e464-4835-af5f-75be8561daf6"
+      schedule_id: "183367"
 
-  update_interval: 3600
-
+  update_interval: 7200  # toutes les 2 heures
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
   mqtt_username: "monuser"
   mqtt_password: "monpassword"
   discovery_prefix: "homeassistant"
 
-  # (Optionnel) création d'événements dans HA
-  ha_url: "http://homeassistant.local:8123"
-  ha_token: ""
-  ha_calendar_entity: "calendar.rseq_equipes"
-
 schema:
   entity_prefix: str?
   teams:
     - name: str
-      team_url: str
-  team_url: str?                   # legacy
+      league_id: str
+      schedule_id: str
   update_interval: int(30,86400)
   mqtt_host: str
   mqtt_port: int(1,65535)
   mqtt_username: str
   mqtt_password: str
   discovery_prefix: str
-  ha_url: str
-  ha_token: str
-  ha_calendar_entity: str
 
 build:
   builder: docker
