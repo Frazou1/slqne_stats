@@ -44,35 +44,38 @@ def get_html_selenium(url: str) -> str:
 # 🧠 Parsing des sections
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
-    """Parse les standings Spordle avec plusieurs divisions (ex: Est/Ouest)."""
+    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite."""
     soup = BeautifulSoup(html, "html.parser")
-    divisions = []
-    
-    headers = soup.find_all(["h2", "h3"], string=re.compile(r"Division", re.I))
-    if not headers:
-        print("[WARN] Aucune division détectée, tentative de lecture unique…")
-        table = soup.find("table")
-        return parse_table_generic(str(table)) if table else []
-    
-    for header in headers:
-        division_name = header.get_text(strip=True)
-        table = header.find_next("table")
-        if not table:
-            continue
-        
-        headers_cols = [th.get_text(strip=True) for th in table.select("thead th")]
+    all_rows = []
+    tables = soup.find_all("table")
+
+    if not tables:
+        print("[WARN] Aucune table trouvée dans le HTML.")
+        return []
+
+    print(f"[DEBUG] {len(tables)} tables trouvées dans la page standings")
+
+    for table in tables:
+        # Recherche du titre de division juste avant la table
+        division_name = "Division inconnue"
+        prev = table.find_previous(string=re.compile(r"Division", re.I))
+        if prev:
+            division_name = prev.strip()
+
+        headers = [th.get_text(strip=True) for th in table.select("thead th")]
         rows = []
         for tr in table.select("tbody tr"):
             tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-            if len(tds) >= len(headers_cols):
-                row = dict(zip(headers_cols, tds))
+            if len(tds) >= len(headers):
+                row = dict(zip(headers, tds))
                 row["division"] = division_name
                 rows.append(row)
+
         print(f"[DEBUG] {len(rows)} lignes extraites pour {division_name}")
-        divisions.extend(rows)
-    
-    print(f"[DEBUG] Total {len(divisions)} lignes de standings multi-division extraites")
-    return divisions
+        all_rows.extend(rows)
+
+    print(f"[DEBUG] Total {len(all_rows)} lignes multi-division extraites")
+    return all_rows
 
 def parse_table_generic(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
