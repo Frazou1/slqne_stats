@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 import os, re, json, time, argparse
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
+
 import requests
-from bs4 import BeautifulSoup
 import paho.mqtt.client as mqtt
-from zoneinfo import ZoneInfo
+from bs4 import BeautifulSoup
+
+# Selenium
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 LOCAL_TZ = "America/Toronto"
 
@@ -13,46 +21,84 @@ LOCAL_TZ = "America/Toronto"
 # 🔧 Utils
 # ===============================================================
 def now_local_iso():
+    from zoneinfo import ZoneInfo
     return datetime.now(ZoneInfo(LOCAL_TZ)).isoformat()
 
 def slugify(name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
 
-def get_html(url: str) -> str:
-    print(f"[INFO] Téléchargement de la page {url}")
-    r = requests.get(url, timeout=30, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; SLQNEStats/1.0; +https://frazhome.zapto.org)"
-    })
-    if r.status_code != 200:
-        raise RuntimeError(f"Erreur HTTP {r.status_code} sur {url}")
-    print(f"[DEBUG] Taille HTML: {len(r.text)} caractères")
-    return r.text
+def build_driver() -> webdriver.Chrome:
+    """Prépare un navigateur Chromium headless"""
+    chrome_options = Options()
+    env_flags = os.getenv("CHROMIUM_FLAGS", "")
+    if env_flags:
+        for flag in env_flags.split():
+            chrome_options.add_argument(flag)
+    else:
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,2400")
+    chrome_options.add_argument("--lang=fr-CA")
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    )
+    service = Service("/usr/bin/chromedriver")
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 # ===============================================================
-# 🧠 Extraction du classement Spordle
+# 📊 Extraction dynamique via Selenium
 # ===============================================================
-def parse_standings(html: str) -> List[Dict]:
+def scrape_category(league_id: str, schedule_id: str, driver: webdriver.Chrome) -> List[Dict]:
+    """Ouvre la page Spordle de la catégorie et extrait le tableau de classement"""
+    url = f"https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings/{league_id}?tab=standings&scheduleId={schedule_id}"
+    print(f"[DEBUG] URL générée: {url}")
+
+    driver.get(url)
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "table"))
+        )
+        time.sleep(2)
+    except Exception as e:
+        print(f"[WARN] Aucune table détectée pour {league_id}: {e}")
+
+    html = driver.page_source
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", class_=re.compile("StatsStandingsTable_table"))
+
+    # Les tableaux Spordle utilisent des classes dynamiques de type StatsStandingsTable_table__xxx
+    table = None
+    for t in soup.find_all("table"):
+        if "StatsStandingsTable" in str(t) or len(t.find_all("th")) > 5:
+            table = t
+            break
+
     if not table:
         print("[WARN] Table de classement non trouvée dans le HTML.")
-        with open("/share/slqne_last.html", "w", encoding="utf-8") as f:
-            f.write(html)
+        try:
+            os.makedirs("/share", exist_ok=True)
+            with open("/share/slqne_last.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            print("[DEBUG] Snapshot HTML écrit dans /share/slqne_last.html")
+        except Exception as e:
+            print(f"[ERROR] Impossible d'écrire le snapshot HTML: {e}")
         return []
 
     headers = [th.get_text(strip=True) for th in table.select("thead th")]
     print(f"[DEBUG] En-têtes détectées: {headers}")
 
-    standings = []
+    rows = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if not tds or len(tds) < 2:
+        if len(tds) < len(headers):
             continue
-        row = dict(zip(headers, tds))
-        standings.append(row)
+        entry = dict(zip(headers, tds))
+        rows.append(entry)
 
-    print(f"[DEBUG] {len(standings)} lignes extraites du classement.")
-    return standings
+    print(f"[INFO] {len(rows)} lignes extraites pour cette catégorie.")
+    return rows
 
 # ===============================================================
 # 🚀 MQTT
@@ -92,10 +138,9 @@ def main():
     parser.add_argument("--discovery_prefix", default="homeassistant")
     args = parser.parse_args()
 
-    # Charger les équipes depuis options.json
     teams = json.loads(args.teams_json) if args.teams_json else []
     if not teams:
-        print("[ERREUR] Aucune équipe fournie.")
+        print("[ERREUR] Aucune catégorie fournie (teams-json vide)")
         return
 
     # Connexion MQTT
@@ -106,33 +151,25 @@ def main():
     client.loop_start()
     print("[INFO] Connecté à MQTT")
 
-    # Boucle sur les catégories configurées
+    driver = build_driver()
+
     for team in teams:
         name = team.get("name", "Catégorie")
         league_id = team.get("league_id")
         schedule_id = team.get("schedule_id")
-
-        if not league_id or not schedule_id:
-            print(f"[ERREUR] Catégorie {name} sans league_id ou schedule_id.")
-            continue
-
-        url = (
-            f"https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/"
-            f"schedule-stats-standings/{league_id}?tab=standings&scheduleId={schedule_id}"
-        )
-
         slug = slugify(name)
         print(f"[INFO] --- Traitement catégorie {name} ---")
-        print(f"[DEBUG] URL générée: {url}")
+
+        if not league_id or not schedule_id:
+            print(f"[ERREUR] {name}: league_id ou schedule_id manquant")
+            continue
 
         try:
-            html = get_html(url)
-            standings = parse_standings(html)
+            standings = scrape_category(league_id, schedule_id, driver)
             if not standings:
                 print(f"[WARN] Aucun classement trouvé pour {name}")
                 continue
 
-            # Publier MQTT
             mqtt_publish(
                 client,
                 args.discovery_prefix,
@@ -140,17 +177,17 @@ def main():
                 "classement",
                 "mdi:trophy",
                 f"{len(standings)} équipes",
-                {"category": name, "standings": standings, "updated": now_local_iso()}
+                {"standings": standings, "updated": now_local_iso()}
             )
-
-            print(f"[INFO] ✅ Catégorie {name}: {len(standings)} équipes publiées.")
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
 
-    print("[INFO] Tous les teams traités.")
+    driver.quit()
     client.loop_stop()
     client.disconnect()
+    print("[INFO] Tous les teams traités.")
+    print("[INFO] Terminé.")
 
 if __name__ == "__main__":
     main()
