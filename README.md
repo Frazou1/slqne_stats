@@ -1,4 +1,4 @@
-# RSEQ Team Calendar
+# SLQNE Stats
 
 **RSEQ Team Calendar** est un add-on Home Assistant qui récupère le calendrier d’une équipe sur le site du [RSEQ – Réseau du sport étudiant du Québec](https://diffusion.rseq.ca/) (via Selenium headless).  
 L’add-on extrait les prochains matchs depuis la section *Calendrier de l’équipe* et les publie en tant que capteurs MQTT, disponibles automatiquement dans Home Assistant via la découverte MQTT (*MQTT Discovery*).
