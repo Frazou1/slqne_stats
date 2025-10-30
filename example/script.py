@@ -21,7 +21,6 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 def setup_driver():
-    """Initialise Chrome headless (même config que ton add-on RSEQ)."""
     opts = Options()
     opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
@@ -33,7 +32,6 @@ def setup_driver():
     return driver
 
 def get_html_selenium(url: str) -> str:
-    """Charge la page Spordle et renvoie le HTML complet."""
     print(f"[INFO] Ouverture de {url}")
     driver = setup_driver()
     driver.get(url)
@@ -46,11 +44,12 @@ def get_html_selenium(url: str) -> str:
 # ===============================================================
 # 🧠 Parsing des sections
 # ===============================================================
-def parse_standings(html: str) -> List[Dict]:
+def parse_table_generic(html: str) -> List[Dict]:
+    """Utilisée pour standings ou playerstats."""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
-        print("[WARN] Table standings non trouvée")
+        print("[WARN] Aucune table trouvée dans la page.")
         return []
 
     headers = [th.get_text(strip=True) for th in table.select("thead th")]
@@ -60,45 +59,53 @@ def parse_standings(html: str) -> List[Dict]:
         if len(tds) >= len(headers):
             rows.append(dict(zip(headers, tds)))
 
-    print(f"[DEBUG] {len(rows)} lignes de classement extraites")
+    print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)")
     return rows
 
-def parse_players_stats(html: str) -> List[Dict]:
+def detect_last_game(html: str) -> Optional[Dict]:
+    """Recherche un tableau ou bloc contenant les derniers matchs."""
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table")
-    if not table:
-        print("[WARN] Table des joueurs non trouvée")
-        return []
 
-    headers = [th.get_text(strip=True) for th in table.select("thead th")]
-    rows = []
-    for tr in table.select("tbody tr"):
-        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds) >= len(headers):
-            rows.append(dict(zip(headers, tds)))
+    # --- Bloc 1 : table id="recentGames"
+    tbl = soup.find("table", {"id": "recentGames"})
+    if tbl:
+        row = tbl.find("tr")
+        if row:
+            cols = [td.get_text(strip=True) for td in row.find_all("td")]
+            print(f"[DEBUG] Dernier match (recentGames): {cols}")
+            return {
+                "date": cols[0] if len(cols) > 0 else "",
+                "visitor": cols[1] if len(cols) > 1 else "",
+                "home": cols[2] if len(cols) > 2 else "",
+                "result": cols[3] if len(cols) > 3 else ""
+            }
 
-    print(f"[DEBUG] {len(rows)} lignes de statistiques joueurs extraites")
-    return rows
+    # --- Bloc 2 : recherche libre d’un div “Derniers matchs”
+    candidates = soup.find_all(text=re.compile(r"(Derniers matchs|Recent Games)", re.I))
+    for c in candidates:
+        table = c.find_parent("div").find("table") if c.find_parent("div") else None
+        if table:
+            row = table.find("tr")
+            if row:
+                cols = [td.get_text(strip=True) for td in row.find_all("td")]
+                print(f"[DEBUG] Dernier match (bloc libre): {cols}")
+                return {
+                    "date": cols[0] if len(cols) > 0 else "",
+                    "visitor": cols[1] if len(cols) > 1 else "",
+                    "home": cols[2] if len(cols) > 2 else "",
+                    "result": cols[3] if len(cols) > 3 else ""
+                }
 
-def detect_last_game(standings: List[Dict]) -> Optional[Dict]:
-    """Essaie d’extraire le dernier match à partir de la colonne 'Dernier match' ou équivalente."""
-    if not standings:
-        return None
-
-    for entry in standings:
-        for key, value in entry.items():
-            if "dernier" in key.lower() or "last" in key.lower():
-                if value:
-                    print(f"[DEBUG] Dernier match trouvé dans le classement: {value}")
-                    return {"result": value, "team": entry.get("Équipe") or entry.get("Team")}
+    print("[WARN] Aucun dernier match détecté dans le HTML.")
     return None
 
 # ===============================================================
 # 🚀 MQTT
 # ===============================================================
-def mqtt_publish(client, prefix, slug, label, icon, state, attributes):
-    sensor_id = f"{prefix}_{slug}_{label}"
-    base = f"{prefix}/sensor/{sensor_id}"
+def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
+    """Publie un capteur MQTT avec MQTT Discovery."""
+    sensor_id = f"{entity_prefix}_{slug}_{label}"
+    base = f"{discovery_prefix}/sensor/{sensor_id}"
     cfg_topic = f"{base}/config"
     state_topic = f"{base}/state"
     attr_topic = f"{base}/attributes"
@@ -136,7 +143,6 @@ def main():
         print("[ERREUR] Aucune catégorie configurée.")
         return
 
-    # Connexion MQTT
     client = mqtt.Client(client_id=f"slqne_hockey_{int(time.time())}")
     if args.mqtt_user:
         client.username_pw_set(args.mqtt_user, args.mqtt_pass)
@@ -151,17 +157,17 @@ def main():
         league_id = team.get("league_id")
         schedule_id = team.get("schedule_id")
         slug = slugify(name)
-
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
             # 1️⃣ Classement
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
-            standings = parse_standings(html_standings)
+            standings = parse_table_generic(html_standings)
 
             mqtt_publish(
-                client, args.discovery_prefix, slug, "classement", "mdi:trophy",
+                client, args.discovery_prefix, args.entity_prefix, slug,
+                "classement", "mdi:trophy",
                 f"{len(standings)} équipes",
                 {"standings": standings, "updated": now_local_iso()}
             )
@@ -169,19 +175,21 @@ def main():
             # 2️⃣ Stats joueurs
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
-            players = parse_players_stats(html_players)
+            players = parse_table_generic(html_players)
 
             mqtt_publish(
-                client, args.discovery_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
+                client, args.discovery_prefix, args.entity_prefix, slug,
+                "stats_joueurs", "mdi:hockey-sticks",
                 f"{len(players)} joueurs",
                 {"players": players, "updated": now_local_iso()}
             )
 
-            # 3️⃣ Dernier match (si détecté)
-            last_game = detect_last_game(standings)
+            # 3️⃣ Dernier match (si dispo)
+            last_game = detect_last_game(html_standings)
             if last_game:
                 mqtt_publish(
-                    client, args.discovery_prefix, slug, "dernier_match", "mdi:hockey-puck",
+                    client, args.discovery_prefix, args.entity_prefix, slug,
+                    "dernier_match", "mdi:hockey-puck",
                     last_game.get("result", "N/A"),
                     {"last_game": last_game, "updated": now_local_iso()}
                 )
