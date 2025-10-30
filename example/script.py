@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os, re, json, time, argparse
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 import requests
 from bs4 import BeautifulSoup
 import paho.mqtt.client as mqtt
@@ -29,99 +29,30 @@ def get_html(url: str) -> str:
     return r.text
 
 # ===============================================================
-# 🧠 Extraction des sections du site Spordle
+# 🧠 Extraction du classement Spordle
 # ===============================================================
 def parse_standings(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", {"id": "standings"})
+    table = soup.find("table", class_=re.compile("StatsStandingsTable_table"))
     if not table:
-        print("[WARN] Table standings non trouvée")
+        print("[WARN] Table de classement non trouvée dans le HTML.")
+        with open("/share/slqne_last.html", "w", encoding="utf-8") as f:
+            f.write(html)
         return []
 
     headers = [th.get_text(strip=True) for th in table.select("thead th")]
-    print(f"[DEBUG] Headers standings: {headers}")
+    print(f"[DEBUG] En-têtes détectées: {headers}")
 
-    rows = []
+    standings = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds) < 3:
+        if not tds or len(tds) < 2:
             continue
-        entry = dict(zip(headers, tds))
-        rows.append(entry)
+        row = dict(zip(headers, tds))
+        standings.append(row)
 
-    print(f"[DEBUG] {len(rows)} lignes de classement extraites")
-    return rows
-
-def parse_players_stats(html: str) -> List[Dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", {"id": "playersStats"})
-    if not table:
-        print("[WARN] Table playersStats non trouvée")
-        return []
-
-    headers = [th.get_text(strip=True) for th in table.select("thead th")]
-    print(f"[DEBUG] Headers joueurs: {headers}")
-
-    rows = []
-    for tr in table.select("tbody tr"):
-        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if not tds or len(tds) < 3:
-            continue
-        player = dict(zip(headers, tds))
-        rows.append(player)
-
-    print(f"[DEBUG] {len(rows)} lignes de joueurs extraites")
-    return rows
-
-def parse_goalies_stats(html: str) -> List[Dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", {"id": "goaliesStats"})
-    if not table:
-        print("[WARN] Table goaliesStats non trouvée")
-        return []
-
-    headers = [th.get_text(strip=True) for th in table.select("thead th")]
-    print(f"[DEBUG] Headers gardiens: {headers}")
-
-    rows = []
-    for tr in table.select("tbody tr"):
-        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if not tds or len(tds) < 3:
-            continue
-        goalie = dict(zip(headers, tds))
-        rows.append(goalie)
-
-    print(f"[DEBUG] {len(rows)} lignes de gardiens extraites")
-    return rows
-
-def parse_last_game_from_standings(html: str) -> Optional[Dict]:
-    """
-    Tentative de repérage du dernier match à partir des tables standings / stats
-    (si aucune info explicite n’est donnée ailleurs sur la page)
-    """
-    try:
-        # Certains blocs Spordle incluent une table "recentGames"
-        soup = BeautifulSoup(html, "html.parser")
-        game_table = soup.find("table", {"id": "recentGames"})
-        if not game_table:
-            print("[WARN] Table recentGames non trouvée")
-            return None
-
-        first = game_table.select_one("tbody tr")
-        if not first:
-            return None
-
-        cols = [td.get_text(strip=True) for td in first.find_all("td")]
-        print(f"[DEBUG] Ligne match trouvée: {cols}")
-        return {
-            "date": cols[0] if len(cols) > 0 else "",
-            "visitor": cols[1] if len(cols) > 1 else "",
-            "home": cols[2] if len(cols) > 2 else "",
-            "result": cols[3] if len(cols) > 3 else ""
-        }
-    except Exception as e:
-        print(f"[DEBUG] Erreur parse_last_game_from_standings: {e}")
-        return None
+    print(f"[DEBUG] {len(standings)} lignes extraites du classement.")
+    return standings
 
 # ===============================================================
 # 🚀 MQTT
@@ -161,10 +92,10 @@ def main():
     parser.add_argument("--discovery_prefix", default="homeassistant")
     args = parser.parse_args()
 
-    # Charger les équipes
+    # Charger les équipes depuis options.json
     teams = json.loads(args.teams_json) if args.teams_json else []
     if not teams:
-        print("[ERREUR] Aucune équipe fournie")
+        print("[ERREUR] Aucune équipe fournie.")
         return
 
     # Connexion MQTT
@@ -175,41 +106,44 @@ def main():
     client.loop_start()
     print("[INFO] Connecté à MQTT")
 
+    # Boucle sur les catégories configurées
     for team in teams:
-        name = team.get("name", "Équipe")
-        url = team.get("team_url")
+        name = team.get("name", "Catégorie")
+        league_id = team.get("league_id")
+        schedule_id = team.get("schedule_id")
+
+        if not league_id or not schedule_id:
+            print(f"[ERREUR] Catégorie {name} sans league_id ou schedule_id.")
+            continue
+
+        url = (
+            f"https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/"
+            f"schedule-stats-standings/{league_id}?tab=standings&scheduleId={schedule_id}"
+        )
+
         slug = slugify(name)
-        print(f"[INFO] --- Traitement équipe {name} ---")
+        print(f"[INFO] --- Traitement catégorie {name} ---")
+        print(f"[DEBUG] URL générée: {url}")
 
         try:
             html = get_html(url)
             standings = parse_standings(html)
-            players = parse_players_stats(html)
-            goalies = parse_goalies_stats(html)
-            last_game = parse_last_game_from_standings(html)
+            if not standings:
+                print(f"[WARN] Aucun classement trouvé pour {name}")
+                continue
 
-            # 🔹 Publier classement
-            mqtt_publish(client, args.discovery_prefix, slug, "classement", "mdi:trophy",
-                         f"{len(standings)} équipes",
-                         {"standings": standings, "updated": now_local_iso()})
+            # Publier MQTT
+            mqtt_publish(
+                client,
+                args.discovery_prefix,
+                slug,
+                "classement",
+                "mdi:trophy",
+                f"{len(standings)} équipes",
+                {"category": name, "standings": standings, "updated": now_local_iso()}
+            )
 
-            # 🔹 Publier joueurs
-            mqtt_publish(client, args.discovery_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
-                         f"{len(players)} joueurs",
-                         {"players": players, "updated": now_local_iso()})
-
-            # 🔹 Publier gardiens
-            mqtt_publish(client, args.discovery_prefix, slug, "stats_gardiens", "mdi:account-hard-hat",
-                         f"{len(goalies)} gardiens",
-                         {"goalies": goalies, "updated": now_local_iso()})
-
-            # 🔹 Dernier match (si dispo)
-            if last_game:
-                mqtt_publish(client, args.discovery_prefix, slug, "dernier_match", "mdi:hockey-puck",
-                             f"{last_game.get('visitor','')} @ {last_game.get('home','')}",
-                             {"last_game": last_game, "updated": now_local_iso()})
-            else:
-                print(f"[WARN] Aucun dernier match détecté pour {name}")
+            print(f"[INFO] ✅ Catégorie {name}: {len(standings)} équipes publiées.")
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
