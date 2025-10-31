@@ -4,15 +4,12 @@
 """
 SLQNE – Scraper Spordle automatisé
 ----------------------------------
-Version : 3.2 (Novembre 2025)
+Version : 3.3 (Novembre 2025)
 
-Fonctions :
- - Récupère le classement, les stats joueurs, le dernier et le prochain match
- - Extrait les logos des équipes
- - Publie sur MQTT
- - Gestion des timeouts et redémarrage auto
- - Garde un seul driver Selenium ouvert pendant tout le cycle
- - Lecture dynamique des équipes via EQUIPES_JSON
+Compatible avec run.sh :
+  → lit --teams-json et --players-json
+  → garde un seul driver Selenium ouvert
+  → publie les logos, dernier match et prochain match
 """
 
 import os
@@ -20,6 +17,7 @@ import re
 import json
 import time
 import random
+import argparse
 import paho.mqtt.publish as publish
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -27,43 +25,57 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
 # ===============================================================
-# ⚙️ CONFIGURATION
+# ⚙️ CONFIGURATION VIA ARGPARSE
 # ===============================================================
-MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USER = os.getenv("MQTT_USER", "")
-MQTT_PASS = os.getenv("MQTT_PASS", "")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "7200"))
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--teams-json", default="")
+    parser.add_argument("--players-json", default="")
+    parser.add_argument("--entity_prefix", default="slqne")
+    parser.add_argument("--mqtt_host", default="127.0.0.1")
+    parser.add_argument("--mqtt_port", type=int, default=1883)
+    parser.add_argument("--mqtt_user", default="")
+    parser.add_argument("--mqtt_pass", default="")
+    parser.add_argument("--discovery_prefix", default="homeassistant")
+    args = parser.parse_args()
 
-# --- Lecture dynamique des équipes via variable JSON ---
-try:
-    equipes_json = os.getenv("EQUIPES_JSON", "")
-    if equipes_json.strip():
-        data = json.loads(equipes_json)
-        EQUIPES = {e["name"]: e["url"] for e in data}
-        print(f"[INFO] {len(EQUIPES)} équipes chargées depuis configuration.")
-    else:
-        EQUIPES = {}
-        print("[WARN] Aucune équipe définie via EQUIPES_JSON.")
-except Exception as e:
-    print(f"[ERROR] Lecture EQUIPES_JSON: {e}")
+    teams = json.loads(args.teams_json) if args.teams_json else []
+    players = json.loads(args.players_json) if args.players_json else []
+
     EQUIPES = {}
-# ===============================================================
+    for team in teams:
+        league_id = team.get("league_id")
+        schedule_id = team.get("schedule_id")
+        name = team.get("name")
+        if league_id and schedule_id and name:
+            url = f"https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings/{league_id}?tab=schedule&scheduleId={schedule_id}"
+            EQUIPES[name] = url
+
+    if not EQUIPES:
+        print("[ERROR] Aucun bloc 'teams' valide trouvé dans la config.")
+    else:
+        print(f"[INFO] {len(EQUIPES)} équipes configurées à partir de run.sh.")
+
+    if players:
+        print(f"[INFO] {len(players)} joueur(s) suivis :")
+        for p in players:
+            print(f"   → {p.get('player_name','?')} ({p.get('team_name','?')})")
+
+    return args, EQUIPES
 
 
 # ===============================================================
 # 📡 MQTT
 # ===============================================================
-def publish_sensor(sensor, payload):
-    """Publie un sensor MQTT"""
+def publish_sensor(sensor, payload, mqtt_host, mqtt_port, mqtt_user, mqtt_pass):
     try:
         topic = f"homeassistant/sensor/{sensor}/state"
         publish.single(
             topic,
             json.dumps(payload, ensure_ascii=False),
-            hostname=MQTT_HOST,
-            port=MQTT_PORT,
-            auth={'username': MQTT_USER, 'password': MQTT_PASS} if MQTT_USER else None,
+            hostname=mqtt_host,
+            port=mqtt_port,
+            auth={'username': mqtt_user, 'password': mqtt_pass} if mqtt_user else None,
         )
         print(f"[MQTT] Sensor publié: {sensor}")
     except Exception as e:
@@ -74,21 +86,18 @@ def publish_sensor(sensor, payload):
 # 🌐 SELENIUM
 # ===============================================================
 def create_driver():
-    """Initialise le navigateur headless (une seule instance par cycle)"""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     driver = webdriver.Chrome(options=chrome_options)
     driver.set_page_load_timeout(60)
     return driver
 
 
 def safe_get(driver, url, retries=3):
-    """Ouvre une page avec retries si 504 ou timeout"""
     for i in range(retries):
         try:
             driver.get(url)
@@ -106,7 +115,6 @@ def safe_get(driver, url, retries=3):
 
 
 def scroll_page(driver):
-    """Scroll progressif jusqu'à la fin du contenu (lazy load complet)"""
     last_height = driver.execute_script("return document.body.scrollHeight")
     scroll_count = 0
     while True:
@@ -124,7 +132,6 @@ def scroll_page(driver):
 # 🧩 PARSING HTML
 # ===============================================================
 def parse_logos_from_standings(html):
-    """Extrait les logos et noms d'équipes du classement"""
     soup = BeautifulSoup(html, "html.parser")
     logos = {}
     for row in soup.select("tr"):
@@ -137,14 +144,11 @@ def parse_logos_from_standings(html):
 
 
 def parse_games_from_schedule(html):
-    """Analyse les matchs depuis la page HTML"""
     soup = BeautifulSoup(html, "html.parser")
     matches = []
-
     cards = soup.find_all(["div", "article"], attrs={"data-testid": re.compile("game-card|GameCard", re.I)})
     if not cards:
         cards = soup.find_all("div", class_=re.compile("(GameCard|match-card|card)", re.I))
-
     for card in cards:
         try:
             date_tag = card.find("div", string=re.compile(r"\w+ \d{1,2}"))
@@ -162,20 +166,16 @@ def parse_games_from_schedule(html):
                 })
         except Exception:
             continue
-
     print(f"[DEBUG] Total {len(matches)} matchs détectés au total sur la page.")
     return matches
 
 
 def find_team_game(matches, team_name, future=False):
-    """Trouve le dernier (ou prochain) match d'une équipe"""
     norm = re.sub(r"[^a-z0-9]", "", team_name.lower())
     team_matches = [m for m in matches if norm in "".join(re.sub(r"[^a-z0-9]", "", x.lower()) for x in m["teams"])]
-
     if not team_matches:
         print(f"[INFO] Aucun match trouvé pour {team_name}")
         return None
-
     if future:
         for m in team_matches:
             if not m["final"]:
@@ -192,75 +192,57 @@ def find_team_game(matches, team_name, future=False):
 
 
 # ===============================================================
-# 🏒 PROCESSUS PAR ÉQUIPE
+# 🏒 TRAITEMENT PAR ÉQUIPE
 # ===============================================================
-def handle_team(driver, name, url):
-    """Traite une équipe complète avec un seul driver ouvert"""
+def handle_team(driver, name, url, args):
     print(f"[INFO] --- Traitement catégorie {name} ---")
-
-    # 1️⃣ Classement + logos
-    standings_html = safe_get(driver, f"{url}?tab=standings")
+    standings_html = safe_get(driver, url.replace("?tab=schedule", "?tab=standings"))
     if standings_html:
         logos = parse_logos_from_standings(standings_html)
-        publish_sensor(f"slqne_{slugify(name)}_logos_equipes", logos)
+        publish_sensor(f"{args.entity_prefix}_{slugify(name)}_logos_equipes", logos,
+                       args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass)
 
-    # 2️⃣ Calendrier (même driver)
-    schedule_url = f"{url}?tab=schedule"
-    html = safe_get(driver, schedule_url)
+    schedule_html = safe_get(driver, url)
     scroll_page(driver)
-    matches = parse_games_from_schedule(driver.page_source or html)
+    matches = parse_games_from_schedule(driver.page_source or schedule_html)
 
-    # 3️⃣ Dernier match
     last_game = find_team_game(matches, name, future=False)
     if last_game:
-        publish_sensor(f"slqne_{slugify(name)}_dernier_match", last_game)
+        publish_sensor(f"{args.entity_prefix}_{slugify(name)}_dernier_match", last_game,
+                       args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass)
 
-    # 4️⃣ Prochain match
     next_game = find_team_game(matches, name, future=True)
     if next_game:
-        publish_sensor(f"slqne_{slugify(name)}_prochain_match", next_game)
+        publish_sensor(f"{args.entity_prefix}_{slugify(name)}_prochain_match", next_game,
+                       args.mqtt_host, args.mqtt_port, args.mqtt_user, args.mqtt_pass)
 
 
 def slugify(text):
-    """Simplifie un nom pour usage MQTT"""
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
 # ===============================================================
-# 🚀 BOUCLE PRINCIPALE
+# 🚀 MAIN LOOP
 # ===============================================================
-def main_loop():
-    """Boucle infinie avec protection timeout et relance"""
+def main():
+    args, EQUIPES = get_args()
     print("[INFO] Attente 30s avant démarrage (MQTT warmup)...")
     time.sleep(30)
 
-    while True:
-        print("[INFO] --------------------------------------------------------")
-        print(f"[INFO] Exécution du script Python SLQNE… ({datetime.now().isoformat()})")
-
-        driver = None
-        try:
-            driver = create_driver()
-            if not EQUIPES:
-                print("[ERROR] Aucune équipe à traiter. Vérifie la variable EQUIPES_JSON.")
-                break
-            for equipe, url in EQUIPES.items():
-                handle_team(driver, equipe, url)
-        except Exception as e:
-            print(f"[ERROR] Boucle principale: {e}")
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-
-        print(f"[INFO] Attente {CHECK_INTERVAL}s avant prochaine exécution...\n")
-        time.sleep(CHECK_INTERVAL)
+    driver = None
+    try:
+        driver = create_driver()
+        for equipe, url in EQUIPES.items():
+            handle_team(driver, equipe, url, args)
+    except Exception as e:
+        print(f"[ERROR] Boucle principale: {e}")
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
-# ===============================================================
-# 🧭 ENTRY POINT
-# ===============================================================
 if __name__ == "__main__":
-    main_loop()
+    main()
