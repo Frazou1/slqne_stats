@@ -119,7 +119,7 @@ def parse_players_stats(html: str) -> List[Dict]:
 # 🏒 Récupération du logo d’équipe
 # ===============================================================
 def fetch_team_logo(team_url: str, cache: Dict[str, str]) -> str:
-    """Récupère le logo d’une équipe (avec cache + support background-image)."""
+    """Récupère le logo d’une équipe (supporte background-image, balises <img>, et <span class='img-pill'>)."""
     if not team_url:
         return ""
     if team_url in cache:
@@ -146,18 +146,27 @@ def fetch_team_logo(team_url: str, cache: Dict[str, str]) -> str:
                 print(f"[DEBUG] Logo trouvé (div style): {logo}")
                 return logo
 
-        # --- Cas 2 : fallback sur img ---
-        img_logo = soup.select_one("img[src*='logo'], img[src*='team'], div[class*='logo'] img")
+        # --- Cas 2 : <span class="img-pill"><img src=".../logos/..."> ---
+        img_logo = soup.select_one("span.img-pill img[src*='/logos/']")
         if img_logo and img_logo.get("src"):
             logo = img_logo["src"]
+            cache[team_url] = logo
+            print(f"[DEBUG] Logo trouvé (img-pill): {logo}")
+            return logo
+
+        # --- Cas 3 : fallback général sur balises <img> contenant 'logo' ---
+        img_fallback = soup.select_one("img[src*='logo'], img[src*='team'], div[class*='logo'] img")
+        if img_fallback and img_fallback.get("src"):
+            logo = img_fallback["src"]
             if logo.startswith("/"):
                 logo = f"https://page.spordle.com{logo}"
             cache[team_url] = logo
-            print(f"[DEBUG] Logo trouvé (img): {logo}")
+            print(f"[DEBUG] Logo trouvé (fallback img): {logo}")
             return logo
 
         print(f"[WARN] Aucun logo trouvé sur {team_url}")
         return ""
+
     except Exception as e:
         print(f"[ERROR] fetch_team_logo: {e}")
         return ""
