@@ -44,8 +44,7 @@ def get_html_selenium(url: str) -> str:
 # 🧠 Parsing des sections
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
-    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite.
-       Ignore les tableaux dupliqués ou agrégés (mobile)."""
+    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite."""
     soup = BeautifulSoup(html, "html.parser")
     all_rows = []
     seen_teams = set()
@@ -149,6 +148,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teams-json", default="")
+    parser.add_argument("--players-json", default="")
     parser.add_argument("--entity_prefix", default="slqne")
     parser.add_argument("--mqtt_host", default="core-mosquitto")
     parser.add_argument("--mqtt_port", default="1883")
@@ -158,9 +158,18 @@ def main():
     args = parser.parse_args()
 
     teams = json.loads(args.teams_json) if args.teams_json else []
+    players_followed = json.loads(args.players_json) if args.players_json else []
+
     if not teams:
         print("[ERREUR] Aucune catégorie configurée.")
         return
+
+    if players_followed:
+        print(f"[INFO] {len(players_followed)} joueur(s) suivis :")
+        for pj in players_followed:
+            print(f"   → {pj['player_name']} ({pj['team_name']})")
+    else:
+        print("[INFO] Aucun joueur spécifique à suivre.")
 
     client = mqtt.Client(client_id=f"slqne_hockey_{int(time.time())}")
     if args.mqtt_user:
@@ -179,10 +188,10 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
+            # --- Standings ---
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
-
             mqtt_publish(
                 client, args.discovery_prefix, args.entity_prefix, slug,
                 "classement", "mdi:trophy",
@@ -190,9 +199,19 @@ def main():
                 {"standings": standings, "updated": now_local_iso()}
             )
 
+            # --- Joueurs (stats) ---
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players = parse_table_generic(html_players)
+
+            # Filtrage pour joueurs suivis
+            filtered_players = []
+            for pj in players_followed:
+                if pj["team_name"].lower() == name.lower():
+                    for pl in players:
+                        nom_joueur = pl.get("Nom") or pl.get("Player") or ""
+                        if pj["player_name"].lower() in nom_joueur.lower():
+                            filtered_players.append(pl)
 
             mqtt_publish(
                 client, args.discovery_prefix, args.entity_prefix, slug,
@@ -201,6 +220,18 @@ def main():
                 {"players": players, "updated": now_local_iso()}
             )
 
+            if filtered_players:
+                print(f"[INFO] {len(filtered_players)} joueur(s) suivis trouvés pour {name}")
+                mqtt_publish(
+                    client, args.discovery_prefix, args.entity_prefix, slug,
+                    "playerstats", "mdi:account",
+                    f"{len(filtered_players)} joueur(s)",
+                    {"players": filtered_players, "updated": now_local_iso()}
+                )
+            else:
+                print(f"[INFO] Aucun joueur suivi trouvé dans {name}")
+
+            # --- Dernier match ---
             last_game = detect_last_game(html_standings)
             if last_game:
                 mqtt_publish(
@@ -209,6 +240,17 @@ def main():
                     last_game.get("result", "N/A"),
                     {"last_game": last_game, "updated": now_local_iso()}
                 )
+
+                # Publier aussi par joueur si équipe suivie
+                for pj in players_followed:
+                    if pj["team_name"].lower() == name.lower():
+                        mqtt_publish(
+                            client, args.discovery_prefix, args.entity_prefix,
+                            slugify(pj["player_name"]),
+                            "dernier_match", "mdi:hockey-puck",
+                            last_game.get("result", "N/A"),
+                            {"player": pj["player_name"], "last_game": last_game, "updated": now_local_iso()}
+                        )
             else:
                 print(f"[WARN] Aucun dernier match détecté pour {name}")
 
