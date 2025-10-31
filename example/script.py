@@ -289,7 +289,9 @@ def main():
             slug = slugify(player_name)
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---")
 
-            team_info = next((t for t in teams if t.get("name") == team_name), None)
+            def normalize(s): return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFD", s or "").lower())
+            team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
+
             if not team_info:
                 print(f"[WARN] Aucune équipe trouvée pour {team_name}")
                 continue
