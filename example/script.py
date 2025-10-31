@@ -103,7 +103,34 @@ def parse_table_generic(html: str) -> List[Dict]:
     return rows
 
 # ===============================================================
-# 🧭 Lecture interactive du calendrier (sélection “30 derniers jours” + clic “Appliquer”)
+# 🔄 Scroll complet pour charger tous les matchs
+# ===============================================================
+def scroll_to_load_all_matches(driver):
+    try:
+        container = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list-unstyled"))
+        )
+        last_height = 0
+        same_count = 0
+        for i in range(10):  # max 10 scrolls
+            driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container)
+            time.sleep(1.5)
+            new_height = driver.execute_script("return arguments[0].scrollHeight;", container)
+            lis = container.find_elements(By.CSS_SELECTOR, "li[data-event='true']")
+            print(f"[DEBUG] Scroll {i+1}: {len(lis)} matchs chargés, hauteur={new_height}")
+            if new_height == last_height:
+                same_count += 1
+                if same_count >= 2:
+                    print("[DEBUG] Fin du scroll : plus de nouveaux matchs chargés.")
+                    break
+            else:
+                same_count = 0
+            last_height = new_height
+    except Exception as e:
+        print(f"[WARN] Impossible de scroller pour charger tous les matchs: {e}")
+
+# ===============================================================
+# 🧭 Lecture interactive du calendrier (30 derniers jours)
 # ===============================================================
 def get_schedule_html_interactive(url: str) -> str:
     print(f"[INFO] Ouverture interactive de {url}")
@@ -114,7 +141,6 @@ def get_schedule_html_interactive(url: str) -> str:
         driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(1.5)
 
-        # 1️⃣ Ouverture du dropdown
         btn = WebDriverWait(driver, 15).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
@@ -122,14 +148,11 @@ def get_schedule_html_interactive(url: str) -> str:
         driver.execute_script("arguments[0].click();", btn)
         time.sleep(1)
 
-        # 2️⃣ Trouver le menu actif
         dropdown = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
         )
 
-        # 3️⃣ Cliquer sur "30 derniers jours"
         items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
-        found = False
         for item in items:
             txt = item.text.strip().lower()
             if "30 derniers jours" in txt:
@@ -137,13 +160,9 @@ def get_schedule_html_interactive(url: str) -> str:
                 time.sleep(0.3)
                 driver.execute_script("arguments[0].click();", item)
                 print("[DEBUG] → Option '30 derniers jours' cliquée dans le menu déroulant.")
-                found = True
                 break
-        if not found:
-            print("[WARN] Option '30 derniers jours' non trouvée dans le menu déroulant.")
-            return driver.page_source
 
-        # 4️⃣ Attendre que le calendrier affiche la plage sélectionnée
+        # Attendre le calendrier actif
         try:
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "#date-picker [data-in-range='true']"))
@@ -152,7 +171,7 @@ def get_schedule_html_interactive(url: str) -> str:
         except Exception:
             print("[WARN] Aucun jour marqué 'in-range' détecté après la sélection.")
 
-        # 5️⃣ Cliquer sur le bouton "Appliquer"
+        # Clic sur "Appliquer"
         try:
             apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
             driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
@@ -162,11 +181,8 @@ def get_schedule_html_interactive(url: str) -> str:
         except Exception as e:
             print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
 
-        # 6️⃣ Attendre rechargement
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list-unstyled"))
-        )
-        time.sleep(3)
+        # Scroll pour charger tous les matchs
+        scroll_to_load_all_matches(driver)
 
     except Exception as e:
         print(f"[WARN] Interaction dropdown échouée : {e}")
@@ -221,7 +237,7 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
                 "score_visitor": scores[0],
                 "arena": arena,
                 "raw": " | ".join(teams) + " : " + " - ".join(scores),
-                "match_involving_team": normalized_team in joined or joined in normalized_team
+                "match_involving_team": normalized_team in joined
             }
 
             print(f"[DEBUG] → Comparaison équipe: '{normalized_team}' in '{joined}' = {match['match_involving_team']}")
@@ -258,7 +274,7 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
     }
 
 # ===============================================================
-# 🚀 MQTT
+# 🚀 MQTT + MAIN
 # ===============================================================
 def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
     sensor_id = f"{entity_prefix}_{slug}_{label}"
@@ -281,9 +297,6 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
     client.publish(state_topic, state, retain=True, qos=0)
     print(f"[MQTT] Sensor publié: {sensor_id}")
 
-# ===============================================================
-# 🧩 MAIN
-# ===============================================================
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teams-json", default="")
@@ -325,6 +338,7 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
+            # Classement
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
@@ -334,6 +348,7 @@ def main():
                          f"{len(standings)} équipes",
                          {"standings": standings, "updated": now_local_iso()})
 
+            # Stats joueurs
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players_stats = parse_table_generic(html_players)
@@ -343,6 +358,7 @@ def main():
                          f"{len(players_stats)} joueurs",
                          {"players": players_stats, "updated": now_local_iso()})
 
+            # Dernier match
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
