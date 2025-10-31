@@ -44,7 +44,7 @@ def get_html_selenium(url: str) -> str:
     return html
 
 # ===============================================================
-# 🧠 Parsing standings, logos et stats joueurs
+# 🧠 Parsing standings et stats joueurs
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -84,20 +84,6 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
 
     print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites")
     return all_rows
-
-
-def parse_logos_from_standings(html: str) -> Dict[str, str]:
-    """🆕 Extrait les logos et noms d’équipes du classement."""
-    soup = BeautifulSoup(html, "html.parser")
-    logos = {}
-    for row in soup.select("tr"):
-        team = row.select_one("td:nth-child(2)")
-        logo = row.select_one("img")
-        if team and logo and team.text.strip():
-            logos[team.text.strip()] = logo.get("src")
-    print(f"[DEBUG] {len(logos)} logos d’équipes extraits")
-    return logos
-
 
 def parse_table_generic(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -152,6 +138,166 @@ def scroll_to_load_all_matches(driver):
 
 
 # ===============================================================
+# 🧭 Lecture interactive du calendrier (30 derniers jours)
+# ===============================================================
+def get_schedule_html_interactive(url: str) -> str:
+    print(f"[INFO] Ouverture interactive de {url}")
+    driver = setup_driver()
+    driver.get(url)
+
+    try:
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1.5)
+
+        # 🧩 Clic JS sécurisé sur le bouton calendrier
+        btn = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
+        )
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+
+        try:
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", btn)
+            print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip()}")
+        except Exception as e:
+            print(f"[WARN] Premier clic échoué ({e}), tentative de repli…")
+            driver.execute_script("window.scrollTo(0, 50);")
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", btn)
+            print(f"[DEBUG] Bouton calendrier recliqué après scroll.")
+
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
+            )
+            print("[DEBUG] Menu déroulant du calendrier ouvert avec succès.")
+        except Exception:
+            print("[WARN] Le menu déroulant n’est pas apparu après le clic.")
+
+        dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
+        items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
+        for item in items:
+            txt = item.text.strip().lower()
+            if "30 derniers jours" in txt:
+                driver.execute_script("arguments[0].scrollIntoView(true);", item)
+                time.sleep(0.3)
+                driver.execute_script("arguments[0].click();", item)
+                print("[DEBUG] → Option '30 derniers jours' cliquée dans le menu déroulant.")
+                break
+
+        # Attente du calendrier actif
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#date-picker [data-in-range='true']"))
+            )
+            print("[DEBUG] → Le calendrier montre bien la plage de dates sélectionnée.")
+        except Exception:
+            print("[WARN] Aucun jour marqué 'in-range' détecté après la sélection.")
+
+        # Clic sur "Appliquer"
+        try:
+            apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
+            driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", apply_button)
+            print("[DEBUG] → Bouton 'Appliquer' cliqué avec succès.")
+        except Exception as e:
+            print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
+
+        scroll_to_load_all_matches(driver)
+
+    except Exception as e:
+        print(f"[WARN] Interaction dropdown échouée : {e}")
+
+    html = driver.page_source
+    driver.quit()
+    print(f"[DEBUG] Taille du HTML (calendrier après sélection + Appliquer): {len(html)} caractères")
+    return html
+
+# ===============================================================
+# 🏒 Parsing du calendrier (structure “cards”)
+# ===============================================================
+def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
+    base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
+    url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
+    print(f"[INFO] Lecture du calendrier (structure cards) de {team_name}: {url_schedule}")
+
+    html = get_schedule_html_interactive(url_schedule)
+    soup = BeautifulSoup(html, "html.parser")
+
+    def clean_text(txt):
+        txt = ''.join(c for c in unicodedata.normalize('NFD', txt) if unicodedata.category(c) != 'Mn')
+        txt = txt.lower()
+        txt = re.sub(r'[^a-z0-9]', '', txt)
+        return txt
+
+    normalized_team = clean_text(team_name)
+    all_events = []
+
+    for date_section in soup.select("li[data-date-section]"):
+        date_title = date_section.find("h4")
+        date_text = date_title.get_text(strip=True) if date_title else ""
+
+        for event in date_section.select("li[data-event='true'] article[itemtype='https://schema.org/SportsEvent']"):
+            teams = [t.get_text(strip=True) for t in event.select("article[itemtype='https://schema.org/SportsTeam'] h5 a")]
+            scores = [s.get_text(strip=True) for s in event.select(".font-brand.font-size-lg")]
+            location = event.find("a", href=re.compile("maps/search"))
+            arena = location.get_text(strip=True) if location else ""
+            final = "FINAL" in event.get_text()
+
+            print(f"[DEBUG] Match détecté: {date_text} | {teams} | scores={scores} | arena={arena} | final={final}")
+
+            if not teams or len(scores) < 2 or not final:
+                continue
+
+            joined = clean_text("".join(teams))
+            match = {
+                "date": date_text,
+                "home": teams[-1],
+                "visitor": teams[0],
+                "score_home": scores[-1],
+                "score_visitor": scores[0],
+                "arena": arena,
+                "raw": " | ".join(teams) + " : " + " - ".join(scores),
+                "match_involving_team": normalized_team in joined
+            }
+
+            print(f"[DEBUG] → Comparaison équipe: '{normalized_team}' in '{joined}' = {match['match_involving_team']}")
+            all_events.append(match)
+
+    print(f"[DEBUG] Total {len(all_events)} matchs détectés au total sur la page.")
+    team_events = [m for m in all_events if m["match_involving_team"]]
+
+    if not team_events:
+        print(f"[INFO] Aucun match joué trouvé pour {team_name}")
+        return None
+
+    def parse_date(txt):
+        mois = {"janv":1,"févr":2,"mars":3,"avr":4,"mai":5,"juin":6,"juil":7,"août":8,"sept":9,"oct":10,"nov":11,"déc":12}
+        m = re.search(r"(\d{1,2}) (\w+)", txt)
+        if not m:
+            return datetime.min
+        jour = int(m.group(1))
+        mois_txt = m.group(2).lower()[:4]
+        mois_num = mois.get(mois_txt, 1)
+        return datetime(datetime.now().year, mois_num, jour)
+
+    team_events.sort(key=lambda e: parse_date(e["date"]), reverse=True)
+    last = team_events[0]
+    score_str = f"{last['score_home']}-{last['score_visitor']}"
+    print(f"[DEBUG] ✅ Dernier match trouvé pour {team_name}: {last['visitor']} vs {last['home']} ({score_str})")
+    return {
+        "date": last["date"],
+        "home": last["home"],
+        "visitor": last["visitor"],
+        "score": score_str,
+        "arena": last["arena"],
+        "raw": last["raw"]
+    }
+
+# ===============================================================
 # 🚀 MQTT + MAIN
 # ===============================================================
 def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
@@ -174,7 +320,6 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
     client.publish(attr_topic, json.dumps(attributes, ensure_ascii=False), retain=True, qos=0)
     client.publish(state_topic, state, retain=True, qos=0)
     print(f"[MQTT] Sensor publié: {sensor_id}")
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -217,7 +362,6 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
-            # 🏆 CLASSEMENT
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
@@ -226,12 +370,20 @@ def main():
                          f"{len(standings)} équipes",
                          {"standings": standings, "updated": now_local_iso()})
 
-            # 🆕 LOGOS
-            logos = parse_logos_from_standings(html_standings)
+            url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
+            html_players = get_html_selenium(url_players)
+            players_stats = parse_table_generic(html_players)
             mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
-                         "logos_equipes", "mdi:image-outline",
-                         f"{len(logos)} logos",
-                         {"logos": logos, "updated": now_local_iso()})
+                         "stats_joueurs", "mdi:hockey-sticks",
+                         f"{len(players_stats)} joueurs",
+                         {"players": players_stats, "updated": now_local_iso()})
+
+            last_game = get_last_game_from_schedule(league_id, schedule_id, name)
+            if last_game:
+                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
+                             "dernier_match", "mdi:hockey-puck",
+                             last_game.get("score", "N/A"),
+                             {"last_game": last_game, "updated": now_local_iso()})
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
@@ -239,7 +391,6 @@ def main():
     print("[INFO] Tous les teams traités.")
     client.loop_stop()
     client.disconnect()
-
 
 if __name__ == "__main__":
     main()
