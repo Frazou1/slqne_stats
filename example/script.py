@@ -40,10 +40,9 @@ def init_driver() -> webdriver.Chrome:
     return driver
 
 def get_rendered_html(driver, url: str, wait_time: int = 8) -> str:
-    """Charge la page via Selenium et retourne le HTML complet rendu."""
     print(f"[INFO] Ouverture de {url}")
     driver.get(url)
-    time.sleep(wait_time)  # attendre le rendu React
+    time.sleep(wait_time)
     html = driver.page_source
     print(f"[DEBUG] Taille du HTML ({url.split('?')[-1]}): {len(html)} caractères")
     return html
@@ -77,7 +76,7 @@ def parse_standings(html: str) -> List[Dict]:
     rows = []
 
     for table in tables:
-        division_title = "Inconnue"
+        division_title = "LIGUE HOCKEY MINEUR CAPITALE NATIONALE"
         previous = table.find_previous(["h2", "h3"])
         if previous:
             division_title = previous.get_text(strip=True)
@@ -91,8 +90,6 @@ def parse_standings(html: str) -> List[Dict]:
             if len(tds) >= 3:
                 entry = dict(zip(headers, tds))
                 entry["division"] = division_title
-
-                # Lien d’équipe
                 team_link = tr.find("a", href=True)
                 entry["team_url"] = f"https://page.spordle.com{team_link['href']}" if team_link else ""
                 rows.append(entry)
@@ -122,7 +119,7 @@ def parse_players_stats(html: str) -> List[Dict]:
 # 🏒 Récupération du logo d’équipe
 # ===============================================================
 def fetch_team_logo(team_url: str, cache: Dict[str, str]) -> str:
-    """Récupère le logo d’une équipe (avec cache)."""
+    """Récupère le logo d’une équipe (avec cache + support background-image)."""
     if not team_url:
         return ""
     if team_url in cache:
@@ -135,16 +132,30 @@ def fetch_team_logo(team_url: str, cache: Dict[str, str]) -> str:
         if r.status_code != 200:
             print(f"[WARN] Logo HTTP {r.status_code} sur {team_url}")
             return ""
+
         soup = BeautifulSoup(r.text, "html.parser")
 
-        logo_tag = soup.select_one("img[src*='team'], img[class*='logo'], div[class*='logo'] img")
-        if logo_tag and logo_tag.get("src"):
-            logo = logo_tag["src"]
+        # --- Cas 1 : div avec background-image ---
+        div_logo = soup.find("div", style=re.compile(r"background-image"))
+        if div_logo:
+            style = div_logo.get("style", "")
+            match = re.search(r"url\(['\"]?(https[^'\")]+)", style)
+            if match:
+                logo = match.group(1)
+                cache[team_url] = logo
+                print(f"[DEBUG] Logo trouvé (div style): {logo}")
+                return logo
+
+        # --- Cas 2 : fallback sur img ---
+        img_logo = soup.select_one("img[src*='logo'], img[src*='team'], div[class*='logo'] img")
+        if img_logo and img_logo.get("src"):
+            logo = img_logo["src"]
             if logo.startswith("/"):
                 logo = f"https://page.spordle.com{logo}"
             cache[team_url] = logo
-            print(f"[DEBUG] Logo trouvé: {logo}")
+            print(f"[DEBUG] Logo trouvé (img): {logo}")
             return logo
+
         print(f"[WARN] Aucun logo trouvé sur {team_url}")
         return ""
     except Exception as e:
