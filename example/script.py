@@ -4,12 +4,15 @@
 """
 SLQNE – Scraper Spordle automatisé
 ----------------------------------
-Version : 3.0 (Octobre 2025)
+Version : 3.2 (Novembre 2025)
+
 Fonctions :
  - Récupère le classement, les stats joueurs, le dernier et le prochain match
  - Extrait les logos des équipes
  - Publie sur MQTT
  - Gestion des timeouts et redémarrage auto
+ - Garde un seul driver Selenium ouvert pendant tout le cycle
+ - Lecture dynamique des équipes via EQUIPES_JSON
 """
 
 import os
@@ -19,58 +22,77 @@ import time
 import random
 import paho.mqtt.publish as publish
 from datetime import datetime
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
 
-# ===================== CONFIG =====================
+# ===============================================================
+# ⚙️ CONFIGURATION
+# ===============================================================
 MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USER = os.getenv("MQTT_USER", "")
 MQTT_PASS = os.getenv("MQTT_PASS", "")
-CHECK_INTERVAL = 7200  # secondes
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "7200"))
 
-EQUIPES = {
-    "PATRIOTES QUÉBEC-CENTRE": "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings/bf27e08e-8d52-41be-a097-a6cf79f4466a",
-    "PATRIOTES QUÉBEC-CENTRE 2": "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings/13c38dd1-e464-4835-af5f-75be8561daf6",
-}
-# ===================================================
+# --- Lecture dynamique des équipes via variable JSON ---
+try:
+    equipes_json = os.getenv("EQUIPES_JSON", "")
+    if equipes_json.strip():
+        data = json.loads(equipes_json)
+        EQUIPES = {e["name"]: e["url"] for e in data}
+        print(f"[INFO] {len(EQUIPES)} équipes chargées depuis configuration.")
+    else:
+        EQUIPES = {}
+        print("[WARN] Aucune équipe définie via EQUIPES_JSON.")
+except Exception as e:
+    print(f"[ERROR] Lecture EQUIPES_JSON: {e}")
+    EQUIPES = {}
+# ===============================================================
 
 
+# ===============================================================
+# 📡 MQTT
+# ===============================================================
 def publish_sensor(sensor, payload):
     """Publie un sensor MQTT"""
     try:
         topic = f"homeassistant/sensor/{sensor}/state"
-        publish.single(topic, json.dumps(payload, ensure_ascii=False),
-                       hostname=MQTT_HOST, port=MQTT_PORT,
-                       auth={'username': MQTT_USER, 'password': MQTT_PASS} if MQTT_USER else None)
+        publish.single(
+            topic,
+            json.dumps(payload, ensure_ascii=False),
+            hostname=MQTT_HOST,
+            port=MQTT_PORT,
+            auth={'username': MQTT_USER, 'password': MQTT_PASS} if MQTT_USER else None,
+        )
         print(f"[MQTT] Sensor publié: {sensor}")
     except Exception as e:
         print(f"[ERROR] MQTT publish échoué: {e}")
 
 
+# ===============================================================
+# 🌐 SELENIUM
+# ===============================================================
 def create_driver():
-    """Initialise le navigateur headless"""
+    """Initialise le navigateur headless (une seule instance par cycle)"""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     driver = webdriver.Chrome(options=chrome_options)
-    driver.set_page_load_timeout(45)
+    driver.set_page_load_timeout(60)
     return driver
 
 
 def safe_get(driver, url, retries=3):
-    """Ouvre une page avec retries si 504"""
+    """Ouvre une page avec retries si 504 ou timeout"""
     for i in range(retries):
         try:
             driver.get(url)
-            time.sleep(random.uniform(1.5, 3.5))
+            time.sleep(random.uniform(2, 4))
             html = driver.page_source
             if "504 Gateway" in html or "Time-out" in html:
                 print(f"[WARN] 504 détecté ({i+1}/{retries}) → nouvelle tentative...")
@@ -84,7 +106,7 @@ def safe_get(driver, url, retries=3):
 
 
 def scroll_page(driver):
-    """Scroll progressif jusqu'à la fin du contenu"""
+    """Scroll progressif jusqu'à la fin du contenu (lazy load complet)"""
     last_height = driver.execute_script("return document.body.scrollHeight")
     scroll_count = 0
     while True:
@@ -98,6 +120,9 @@ def scroll_page(driver):
         last_height = new_height
 
 
+# ===============================================================
+# 🧩 PARSING HTML
+# ===============================================================
 def parse_logos_from_standings(html):
     """Extrait les logos et noms d'équipes du classement"""
     soup = BeautifulSoup(html, "html.parser")
@@ -106,9 +131,7 @@ def parse_logos_from_standings(html):
         team = row.select_one("td:nth-child(2)")
         logo = row.select_one("img")
         if team and logo and team.text.strip():
-            name = team.text.strip()
-            url = logo.get("src")
-            logos[name] = url
+            logos[team.text.strip()] = logo.get("src")
     print(f"[DEBUG] {len(logos)} logos d'équipes extraits")
     return logos
 
@@ -117,14 +140,18 @@ def parse_games_from_schedule(html):
     """Analyse les matchs depuis la page HTML"""
     soup = BeautifulSoup(html, "html.parser")
     matches = []
-    cards = soup.find_all("div", class_=re.compile("GameCard|game-card|card"))
+
+    cards = soup.find_all(["div", "article"], attrs={"data-testid": re.compile("game-card|GameCard", re.I)})
+    if not cards:
+        cards = soup.find_all("div", class_=re.compile("(GameCard|match-card|card)", re.I))
+
     for card in cards:
         try:
             date_tag = card.find("div", string=re.compile(r"\w+ \d{1,2}"))
-            teams = [t.get_text(strip=True) for t in card.find_all("div", class_=re.compile("team-name"))]
+            teams = [t.get_text(strip=True) for t in card.find_all("div", class_=re.compile("team-name|teamName"))]
             scores = [s.get_text(strip=True) for s in card.find_all("div", class_=re.compile("score|final-score"))]
-            arena_tag = card.find("div", string=re.compile("QC"))
-            final = "Final" in card.get_text()
+            arena_tag = card.find("div", string=re.compile("QC|Québec|St-", re.I))
+            final = "Final" in card.get_text() or "FINAL" in card.get_text()
             if date_tag and teams:
                 matches.append({
                     "date": date_tag.text.strip(),
@@ -135,6 +162,7 @@ def parse_games_from_schedule(html):
                 })
         except Exception:
             continue
+
     print(f"[DEBUG] Total {len(matches)} matchs détectés au total sur la page.")
     return matches
 
@@ -143,6 +171,7 @@ def find_team_game(matches, team_name, future=False):
     """Trouve le dernier (ou prochain) match d'une équipe"""
     norm = re.sub(r"[^a-z0-9]", "", team_name.lower())
     team_matches = [m for m in matches if norm in "".join(re.sub(r"[^a-z0-9]", "", x.lower()) for x in m["teams"])]
+
     if not team_matches:
         print(f"[INFO] Aucun match trouvé pour {team_name}")
         return None
@@ -154,29 +183,39 @@ def find_team_game(matches, team_name, future=False):
                 return m
         return None
     else:
-        last_final = [m for m in team_matches if m["final"]]
-        return last_final[-1] if last_final else team_matches[-1]
+        finals = [m for m in team_matches if m["final"]]
+        if finals:
+            print(f"[DEBUG] Dernier match trouvé: {finals[-1]['teams']}")
+            return finals[-1]
+        print(f"[DEBUG] Aucun match final trouvé, dernier match brut: {team_matches[-1]['teams']}")
+        return team_matches[-1]
 
 
+# ===============================================================
+# 🏒 PROCESSUS PAR ÉQUIPE
+# ===============================================================
 def handle_team(driver, name, url):
-    """Process complet d'une équipe"""
+    """Traite une équipe complète avec un seul driver ouvert"""
     print(f"[INFO] --- Traitement catégorie {name} ---")
 
-    # 1️⃣ Classement / logos
+    # 1️⃣ Classement + logos
     standings_html = safe_get(driver, f"{url}?tab=standings")
     if standings_html:
         logos = parse_logos_from_standings(standings_html)
         publish_sensor(f"slqne_{slugify(name)}_logos_equipes", logos)
 
-    # 2️⃣ Dernier match
-    schedule_html = safe_get(driver, f"{url}?tab=schedule")
+    # 2️⃣ Calendrier (même driver)
+    schedule_url = f"{url}?tab=schedule"
+    html = safe_get(driver, schedule_url)
     scroll_page(driver)
-    matches = parse_games_from_schedule(schedule_html)
+    matches = parse_games_from_schedule(driver.page_source or html)
+
+    # 3️⃣ Dernier match
     last_game = find_team_game(matches, name, future=False)
     if last_game:
         publish_sensor(f"slqne_{slugify(name)}_dernier_match", last_game)
 
-    # 3️⃣ Prochain match
+    # 4️⃣ Prochain match
     next_game = find_team_game(matches, name, future=True)
     if next_game:
         publish_sensor(f"slqne_{slugify(name)}_prochain_match", next_game)
@@ -187,27 +226,41 @@ def slugify(text):
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
+# ===============================================================
+# 🚀 BOUCLE PRINCIPALE
+# ===============================================================
 def main_loop():
-    """Boucle infinie avec protection timeout"""
+    """Boucle infinie avec protection timeout et relance"""
+    print("[INFO] Attente 30s avant démarrage (MQTT warmup)...")
+    time.sleep(30)
+
     while True:
         print("[INFO] --------------------------------------------------------")
         print(f"[INFO] Exécution du script Python SLQNE… ({datetime.now().isoformat()})")
 
+        driver = None
         try:
             driver = create_driver()
+            if not EQUIPES:
+                print("[ERROR] Aucune équipe à traiter. Vérifie la variable EQUIPES_JSON.")
+                break
             for equipe, url in EQUIPES.items():
                 handle_team(driver, equipe, url)
-            driver.quit()
         except Exception as e:
             print(f"[ERROR] Boucle principale: {e}")
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
         print(f"[INFO] Attente {CHECK_INTERVAL}s avant prochaine exécution...\n")
         time.sleep(CHECK_INTERVAL)
 
 
+# ===============================================================
+# 🧭 ENTRY POINT
+# ===============================================================
 if __name__ == "__main__":
     main_loop()
