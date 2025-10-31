@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-SLQNE – Scraper Spordle automatisé
-----------------------------------
-Version : 3.3 (Novembre 2025)
-
-Fonctions :
- - Récupère le classement, les stats joueurs, le dernier et le prochain match
- - Extrait les logos des équipes
- - Publie sur MQTT
- - Gestion des timeouts et redémarrage auto
- - Garde un seul driver Selenium ouvert pendant tout le cycle
- - Lecture dynamique des équipes via EQUIPES_JSON
-"""
-
-import os, re, json, time, random, argparse, unicodedata, requests
+import os, re, json, time, argparse, unicodedata
 from datetime import datetime
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
@@ -119,95 +103,28 @@ def parse_table_generic(html: str) -> List[Dict]:
     return rows
 
 # ===============================================================
-# 🏒 Extraction et sauvegarde des logos d’équipes
-# ===============================================================
-def extract_team_logos(html: str) -> Dict[str, str]:
-    """
-    Extrait les logos des équipes (nom → URL absolue du logo)
-    depuis la page standings Spordle.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    logos = {}
-
-    for row in soup.select("tbody tr"):
-        img = row.find("img")
-        name_cell = row.find("td")
-        if not img or not name_cell:
-            continue
-        name = name_cell.get_text(strip=True)
-        src = img.get("src", "").strip()
-        if name and src:
-            if src.startswith("//"):
-                src = "https:" + src
-            elif src.startswith("/"):
-                src = "https://page.spordle.com" + src
-            logos[name] = src
-
-    print(f"[DEBUG] {len(logos)} logos extraits")
-    return logos
-
-
-def save_logos_locally(logos: Dict[str, str], output_dir: str = "/config/www/logos_slqne") -> Dict[str, str]:
-    """
-    Télécharge et sauvegarde localement les logos dans /config/www/logos_slqne
-    avec vérification de mise à jour (ne télécharge que si absent ou modifié)
-    Retourne un dict: {équipe: chemin_local}
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    saved = {}
-
-    for team, url in logos.items():
-        try:
-            slug = slugify(team)
-            ext = os.path.splitext(url.split("?")[0])[1] or ".png"
-            filename = f"{slug}{ext}"
-            filepath = os.path.join(output_dir, filename)
-
-            need_download = True
-            if os.path.exists(filepath):
-                try:
-                    r_head = requests.head(url, timeout=5)
-                    remote_size = int(r_head.headers.get("Content-Length", 0))
-                    local_size = os.path.getsize(filepath)
-                    if remote_size > 0 and abs(remote_size - local_size) < 50:
-                        need_download = False
-                        print(f"[LOGO] ⟳ {team} déjà à jour ({filename})")
-                except Exception:
-                    pass
-
-            if need_download:
-                r = requests.get(url, timeout=10)
-                if r.status_code == 200:
-                    with open(filepath, "wb") as f:
-                        f.write(r.content)
-                    print(f"[LOGO] ✅ Téléchargé {team} → {filename}")
-                else:
-                    print(f"[LOGO] ⚠️ {team} : statut {r.status_code}")
-
-            saved[team] = f"/local/logos_slqne/{filename}"
-        except Exception as e:
-            print(f"[LOGO] ❌ Erreur téléchargement {team}: {e}")
-
-    print(f"[DEBUG] {len(saved)} logos présents localement dans {output_dir}")
-    return saved
-
-# ===============================================================
 # 🔄 Scroll complet pour charger tous les matchs
 # ===============================================================
 def scroll_to_load_all_matches(driver):
+    """
+    Fait défiler toute la page Spordle (et non seulement la liste UL)
+    pour forcer le chargement dynamique de tous les matchs.
+    """
     try:
         last_total = 0
         same_count = 0
-        for i in range(12):
+        for i in range(12):  # jusqu’à 12 cycles de scroll complets
             driver.execute_script("window.scrollBy(0, window.innerHeight);")
             time.sleep(1.2)
             driver.execute_script("window.scrollBy(0, -200);")
             time.sleep(1)
+
             html = driver.page_source
             soup = BeautifulSoup(html, "html.parser")
             matches = soup.select("li[data-event='true']")
             total = len(matches)
             print(f"[DEBUG] Scroll global {i+1}: {total} matchs visibles...")
+
             if total == last_total:
                 same_count += 1
                 if same_count >= 3:
@@ -219,26 +136,47 @@ def scroll_to_load_all_matches(driver):
     except Exception as e:
         print(f"[WARN] Impossible de scroller pour charger tous les matchs: {e}")
 
+
 # ===============================================================
-# 🏒 Parsing du calendrier (structure “cards”)
+# 🧭 Lecture interactive du calendrier (30 derniers jours)
 # ===============================================================
 def get_schedule_html_interactive(url: str) -> str:
     print(f"[INFO] Ouverture interactive de {url}")
     driver = setup_driver()
     driver.get(url)
+
     try:
         driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(1.5)
+
+        # 🧩 Clic JS sécurisé sur le bouton calendrier
         btn = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
-        driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-        time.sleep(0.5)
-        driver.execute_script("arguments[0].click();", btn)
-        print("[DEBUG] Bouton calendrier cliqué")
-        dropdown = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
-        )
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
+
+        try:
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", btn)
+            print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip()}")
+        except Exception as e:
+            print(f"[WARN] Premier clic échoué ({e}), tentative de repli…")
+            driver.execute_script("window.scrollTo(0, 50);")
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", btn)
+            print(f"[DEBUG] Bouton calendrier recliqué après scroll.")
+
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
+            )
+            print("[DEBUG] Menu déroulant du calendrier ouvert avec succès.")
+        except Exception:
+            print("[WARN] Le menu déroulant n’est pas apparu après le clic.")
+
+        dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
         items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
         for item in items:
             txt = item.text.strip().lower()
@@ -246,20 +184,46 @@ def get_schedule_html_interactive(url: str) -> str:
                 driver.execute_script("arguments[0].scrollIntoView(true);", item)
                 time.sleep(0.3)
                 driver.execute_script("arguments[0].click();", item)
-                print("[DEBUG] → Option '30 derniers jours' cliquée")
+                print("[DEBUG] → Option '30 derniers jours' cliquée dans le menu déroulant.")
                 break
+
+        # Attente du calendrier actif
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#date-picker [data-in-range='true']"))
+            )
+            print("[DEBUG] → Le calendrier montre bien la plage de dates sélectionnée.")
+        except Exception:
+            print("[WARN] Aucun jour marqué 'in-range' détecté après la sélection.")
+
+        # Clic sur "Appliquer"
+        try:
+            apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
+            driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", apply_button)
+            print("[DEBUG] → Bouton 'Appliquer' cliqué avec succès.")
+        except Exception as e:
+            print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
+
         scroll_to_load_all_matches(driver)
+
     except Exception as e:
         print(f"[WARN] Interaction dropdown échouée : {e}")
+
     html = driver.page_source
     driver.quit()
-    print(f"[DEBUG] Taille du HTML (calendrier): {len(html)} caractères")
+    print(f"[DEBUG] Taille du HTML (calendrier après sélection + Appliquer): {len(html)} caractères")
     return html
 
+# ===============================================================
+# 🏒 Parsing du calendrier (structure “cards”)
+# ===============================================================
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
     base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
     url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
-    print(f"[INFO] Lecture du calendrier de {team_name}: {url_schedule}")
+    print(f"[INFO] Lecture du calendrier (structure cards) de {team_name}: {url_schedule}")
+
     html = get_schedule_html_interactive(url_schedule)
     soup = BeautifulSoup(html, "html.parser")
 
@@ -271,17 +235,23 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
 
     normalized_team = clean_text(team_name)
     all_events = []
+
     for date_section in soup.select("li[data-date-section]"):
         date_title = date_section.find("h4")
         date_text = date_title.get_text(strip=True) if date_title else ""
+
         for event in date_section.select("li[data-event='true'] article[itemtype='https://schema.org/SportsEvent']"):
             teams = [t.get_text(strip=True) for t in event.select("article[itemtype='https://schema.org/SportsTeam'] h5 a")]
             scores = [s.get_text(strip=True) for s in event.select(".font-brand.font-size-lg")]
             location = event.find("a", href=re.compile("maps/search"))
             arena = location.get_text(strip=True) if location else ""
             final = "FINAL" in event.get_text()
+
+            print(f"[DEBUG] Match détecté: {date_text} | {teams} | scores={scores} | arena={arena} | final={final}")
+
             if not teams or len(scores) < 2 or not final:
                 continue
+
             joined = clean_text("".join(teams))
             match = {
                 "date": date_text,
@@ -293,11 +263,17 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
                 "raw": " | ".join(teams) + " : " + " - ".join(scores),
                 "match_involving_team": normalized_team in joined
             }
+
+            print(f"[DEBUG] → Comparaison équipe: '{normalized_team}' in '{joined}' = {match['match_involving_team']}")
             all_events.append(match)
+
+    print(f"[DEBUG] Total {len(all_events)} matchs détectés au total sur la page.")
     team_events = [m for m in all_events if m["match_involving_team"]]
+
     if not team_events:
-        print(f"[INFO] Aucun match trouvé pour {team_name}")
+        print(f"[INFO] Aucun match joué trouvé pour {team_name}")
         return None
+
     def parse_date(txt):
         mois = {"janv":1,"févr":2,"mars":3,"avr":4,"mai":5,"juin":6,"juil":7,"août":8,"sept":9,"oct":10,"nov":11,"déc":12}
         m = re.search(r"(\d{1,2}) (\w+)", txt)
@@ -307,6 +283,7 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
         mois_txt = m.group(2).lower()[:4]
         mois_num = mois.get(mois_txt, 1)
         return datetime(datetime.now().year, mois_num, jour)
+
     team_events.sort(key=lambda e: parse_date(e["date"]), reverse=True)
     last = team_events[0]
     score_str = f"{last['score_home']}-{last['score_visitor']}"
@@ -329,6 +306,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
     cfg_topic = f"{base}/config"
     state_topic = f"{base}/state"
     attr_topic = f"{base}/attributes"
+
     config_payload = {
         "name": f"SLQNE – {label.replace('_', ' ').title()}",
         "uniq_id": sensor_id,
@@ -337,6 +315,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
         "dev": {"name": f"SLQNE {slug}", "ids": [f"slqne_{slug}"]},
         "icon": icon
     }
+
     client.publish(cfg_topic, json.dumps(config_payload), retain=True, qos=1)
     client.publish(attr_topic, json.dumps(attributes, ensure_ascii=False), retain=True, qos=0)
     client.publish(state_topic, state, retain=True, qos=0)
@@ -357,6 +336,11 @@ def main():
     teams = json.loads(args.teams_json) if args.teams_json else []
     players = json.loads(args.players_json) if args.players_json else []
 
+    if players:
+        print(f"[INFO] {len(players)} joueur(s) suivis :")
+        for p in players:
+            print(f"   → {p.get('player_name','?')} ({p.get('team_name','?')})")
+
     if not teams:
         print("[ERREUR] Aucune catégorie configurée.")
         return
@@ -376,6 +360,7 @@ def main():
         schedule_id = team.get("schedule_id")
         slug = slugify(name)
         print(f"[INFO] --- Traitement catégorie {name} ---")
+
         try:
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
@@ -384,13 +369,7 @@ def main():
                          "classement", "mdi:trophy",
                          f"{len(standings)} équipes",
                          {"standings": standings, "updated": now_local_iso()})
-            logos = extract_team_logos(html_standings)
-            if logos:
-                local_paths = save_logos_locally(logos, "/config/www/logos_slqne")
-                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
-                             "logos_equipes", "mdi:image-outline",
-                             f"{len(logos)} logos",
-                             {"logos_web": logos, "logos_local": local_paths, "updated": now_local_iso()})
+
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players_stats = parse_table_generic(html_players)
@@ -398,12 +377,14 @@ def main():
                          "stats_joueurs", "mdi:hockey-sticks",
                          f"{len(players_stats)} joueurs",
                          {"players": players_stats, "updated": now_local_iso()})
+
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
                              "dernier_match", "mdi:hockey-puck",
                              last_game.get("score", "N/A"),
                              {"last_game": last_game, "updated": now_local_iso()})
+
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
 
