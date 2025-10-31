@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, json, time, argparse
+import os, re, json, time, argparse, unicodedata
 from datetime import datetime
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
@@ -18,6 +18,14 @@ def now_local_iso():
 
 def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+def normalize(text: str) -> str:
+    """Supprime accents, espaces et casse pour comparaison fiable"""
+    text = ''.join(
+        c for c in unicodedata.normalize('NFD', text)
+        if unicodedata.category(c) != 'Mn'
+    )
+    return re.sub(r'[^a-z0-9]', '', text.lower())
 
 def setup_driver():
     opts = Options()
@@ -91,7 +99,7 @@ def parse_table_generic(html: str) -> List[Dict]:
 # 🏒 Parsing du calendrier (structure en cartes)
 # ===============================================================
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
-    """Récupère le dernier match complété (avec score) pour une équipe donnée à partir de la structure en cartes (li data-event)."""
+    """Récupère le dernier match FINAL pour une équipe donnée (structure en cartes Spordle)."""
     base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
     url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
     print(f"[INFO] Lecture du calendrier (structure cards) de {team_name}: {url_schedule}")
@@ -105,7 +113,7 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
         date_text = date_title.get_text(strip=True) if date_title else ""
 
         for event in date_section.select("li[data-event='true'] article[itemtype='https://schema.org/SportsEvent']"):
-            teams = [t.get_text(strip=True) for t in event.select("article[itemtype='https://schema.org/SportsTeam'] h5")]
+            teams = [t.get_text(strip=True) for t in event.select("article[itemtype='https://schema.org/SportsTeam'] h5 a")]
             scores = [s.get_text(strip=True) for s in event.select(".font-brand.font-size-lg")]
             location = event.find("a", href=re.compile("maps/search"))
             arena = location.get_text(strip=True) if location else ""
@@ -124,13 +132,14 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
                 "raw": " | ".join(teams) + " : " + " - ".join(scores)
             }
 
-            if team_name.lower() in " ".join(teams).lower():
+            if normalize(team_name) in normalize("".join(teams)):
                 events.append(match)
 
     if not events:
         print(f"[INFO] Aucun match joué trouvé pour {team_name}")
         return None
 
+    # Trier les matchs par date (ordre décroissant)
     def parse_date(txt):
         mois = {
             "janv": 1, "févr": 2, "mars": 3, "avr": 4, "mai": 5, "juin": 6,
@@ -244,10 +253,10 @@ def main():
 
             filtered_players = []
             for pj in players_followed:
-                if pj["team_name"].lower() == name.lower():
+                if normalize(pj["team_name"]) == normalize(name):
                     for pl in players:
                         nom_joueur = pl.get("Nom") or pl.get("Player") or ""
-                        if pj["player_name"].lower() in nom_joueur.lower():
+                        if normalize(pj["player_name"]) in normalize(nom_joueur):
                             filtered_players.append(pl)
 
             mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
@@ -261,21 +270,13 @@ def main():
                              f"{len(filtered_players)} joueur(s)",
                              {"players": filtered_players, "updated": now_local_iso()})
 
-            # --- Dernier match (calendrier en cartes) ---
+            # --- Dernier match ---
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
                              "dernier_match", "mdi:hockey-puck",
                              last_game.get("score", "N/A"),
                              {"last_game": last_game, "updated": now_local_iso()})
-
-                for pj in players_followed:
-                    if pj["team_name"].lower() == name.lower():
-                        mqtt_publish(client, args.discovery_prefix, args.entity_prefix,
-                                     slugify(pj["player_name"]),
-                                     "dernier_match", "mdi:hockey-puck",
-                                     last_game.get("score", "N/A"),
-                                     {"player": pj["player_name"], "last_game": last_game, "updated": now_local_iso()})
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
