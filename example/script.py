@@ -141,17 +141,34 @@ def get_schedule_html_interactive(url: str) -> str:
         driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(1.5)
 
+        # 🧩 Clic JS sécurisé sur le bouton calendrier
         btn = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-outline-primary"))
+            EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
-        print(f"[DEBUG] Texte du bouton calendrier initial: {btn.text.strip()}")
-        driver.execute_script("arguments[0].click();", btn)
+        driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(1)
 
-        dropdown = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
-        )
+        try:
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            time.sleep(0.5)
+            driver.execute_script("arguments[0].click();", btn)
+            print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip()}")
+        except Exception as e:
+            print(f"[WARN] Premier clic échoué ({e}), tentative de repli…")
+            driver.execute_script("window.scrollTo(0, 50);")
+            time.sleep(1)
+            driver.execute_script("arguments[0].click();", btn)
+            print(f"[DEBUG] Bouton calendrier recliqué après scroll.")
 
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
+            )
+            print("[DEBUG] Menu déroulant du calendrier ouvert avec succès.")
+        except Exception:
+            print("[WARN] Le menu déroulant n’est pas apparu après le clic.")
+
+        dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
         items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
         for item in items:
             txt = item.text.strip().lower()
@@ -162,7 +179,7 @@ def get_schedule_html_interactive(url: str) -> str:
                 print("[DEBUG] → Option '30 derniers jours' cliquée dans le menu déroulant.")
                 break
 
-        # Attendre le calendrier actif
+        # Attente du calendrier actif
         try:
             WebDriverWait(driver, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "#date-picker [data-in-range='true']"))
@@ -181,7 +198,6 @@ def get_schedule_html_interactive(url: str) -> str:
         except Exception as e:
             print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
 
-        # Scroll pour charger tous les matchs
         scroll_to_load_all_matches(driver)
 
     except Exception as e:
@@ -338,27 +354,22 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
-            # Classement
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
-
             mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
                          "classement", "mdi:trophy",
                          f"{len(standings)} équipes",
                          {"standings": standings, "updated": now_local_iso()})
 
-            # Stats joueurs
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players_stats = parse_table_generic(html_players)
-
             mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
                          "stats_joueurs", "mdi:hockey-sticks",
                          f"{len(players_stats)} joueurs",
                          {"players": players_stats, "updated": now_local_iso()})
 
-            # Dernier match
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
