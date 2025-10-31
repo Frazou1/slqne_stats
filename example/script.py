@@ -2,13 +2,13 @@
 import os, re, json, time, argparse
 from datetime import datetime
 from typing import List, Dict, Optional
+import requests
 from bs4 import BeautifulSoup
 import paho.mqtt.client as mqtt
 from zoneinfo import ZoneInfo
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 
 LOCAL_TZ = "America/Toronto"
+LOGO_CACHE_FILE = "/data/team_logos_cache.json"
 
 # ===============================================================
 # 🔧 Utils
@@ -17,144 +17,141 @@ def now_local_iso():
     return datetime.now(ZoneInfo(LOCAL_TZ)).isoformat()
 
 def slugify(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
 
-def setup_driver():
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    driver = webdriver.Chrome(options=opts)
-    return driver
-
-def get_html_selenium(url: str) -> str:
-    print(f"[INFO] Ouverture de {url}")
-    driver = setup_driver()
-    driver.get(url)
-    time.sleep(4)
-    html = driver.page_source
-    driver.quit()
-    print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
-    return html
+def get_html(url: str) -> str:
+    print(f"[INFO] Téléchargement de la page {url}")
+    r = requests.get(url, timeout=30, headers={
+        "User-Agent": "Mozilla/5.0 (compatible; SLQNEStats/1.1; +https://frazhome.zapto.org)"
+    })
+    if r.status_code != 200:
+        raise RuntimeError(f"Erreur HTTP {r.status_code} sur {url}")
+    print(f"[DEBUG] Taille HTML: {len(r.text)} caractères")
+    return r.text
 
 # ===============================================================
-# 🧠 Parsing des sections
+# 📦 Gestion du cache logo (pour éviter rechargement inutile)
 # ===============================================================
-def parse_standings_multi_division(html: str) -> List[Dict]:
-    """Parse les standings Spordle avec plusieurs divisions, incluant le logo et le lien de chaque équipe."""
+def load_logo_cache() -> Dict[str, str]:
+    if os.path.exists(LOGO_CACHE_FILE):
+        try:
+            with open(LOGO_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_logo_cache(cache: Dict[str, str]):
+    try:
+        with open(LOGO_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[WARN] Impossible d’enregistrer le cache logo: {e}")
+
+# ===============================================================
+# 🏒 Extraction du classement multi-division
+# ===============================================================
+def parse_standings(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
-    all_rows = []
-    seen_teams = set()
     tables = soup.find_all("table")
-
-    if not tables:
-        print("[WARN] Aucune table trouvée dans le HTML.")
-        return []
-
     print(f"[DEBUG] {len(tables)} tables trouvées dans la page standings")
+    rows = []
 
-    for i, table in enumerate(tables, start=1):
-        division_name = "Division inconnue"
-        prev = table.find_previous(string=re.compile(r"Division", re.I))
-        if prev:
-            division_name = prev.strip()
+    for table in tables:
+        # Repérer la division associée
+        division_title = "Inconnue"
+        previous = table.find_previous("h2")
+        if previous:
+            division_title = previous.get_text(strip=True)
+        else:
+            h3 = table.find_previous("h3")
+            if h3:
+                division_title = h3.get_text(strip=True)
 
         headers = [th.get_text(strip=True) for th in table.select("thead th")]
-        rows = []
+        body_rows = table.select("tbody tr")
+        print(f"[DEBUG] {len(body_rows)} lignes extraites pour {division_title}")
 
-        for tr in table.select("tbody tr"):
-            tds = tr.find_all("td")
-            if not tds or len(tds) < len(headers):
-                continue
+        for tr in body_rows:
+            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(tds) >= 3:
+                entry = dict(zip(headers, tds))
+                entry["division"] = division_title
 
-            row = dict(zip(headers, [td.get_text(strip=True) for td in tds]))
-            row["division"] = division_name
+                # Lien vers la page d’équipe
+                team_link = tr.find("a", href=True)
+                entry["team_url"] = (
+                    f"https://page.spordle.com{team_link['href']}"
+                    if team_link else ""
+                )
+                rows.append(entry)
 
-            # --- Extraction logo + lien d’équipe ---
-            team_cell = None
-            for td in tds:
-                if td.find("a", href=True):
-                    team_cell = td
-                    break
+    print(f"[DEBUG] Total {len(rows)} lignes multi-division extraites")
+    return rows
 
-            if team_cell:
-                a = team_cell.find("a", href=True)
-                img = a.find("img") if a else None
-                team_url = a["href"] if a else ""
-                team_logo = img["src"] if img and img.has_attr("src") else ""
-                team_name = a.get_text(strip=True)
-
-                # Correction du nom
-                row["Équipe"] = team_name
-                row["team_url"] = f"https://page.spordle.com{team_url}" if team_url.startswith("/") else team_url
-                row["team_logo"] = team_logo
-
-            # Évite doublons
-            team_name_key = row.get("Équipe") or row.get("Equipe") or ""
-            if team_name_key and team_name_key not in seen_teams:
-                seen_teams.add(team_name_key)
-                rows.append(row)
-
-        # Ignore les grands tableaux combinés
-        if len(rows) > 15:
-            print(f"[DEBUG] Table {i} ignorée ({len(rows)} lignes, probable tableau global).")
-            continue
-
-        print(f"[DEBUG] {len(rows)} lignes extraites pour {division_name}")
-        all_rows.extend(rows)
-
-    print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites (avec logos).")
-    return all_rows
-
-def parse_table_generic(html: str) -> List[Dict]:
+# ===============================================================
+# 🧠 Stats joueurs
+# ===============================================================
+def parse_players_stats(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
-        print("[WARN] Aucune table trouvée dans la page.")
+        print("[WARN] Table joueurs non trouvée")
         return []
-
     headers = [th.get_text(strip=True) for th in table.select("thead th")]
     rows = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds) >= len(headers):
+        if len(tds) >= 3:
             rows.append(dict(zip(headers, tds)))
-
     print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)")
     return rows
 
-def detect_last_game(html: str) -> Optional[Dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    tbl = soup.find("table", {"id": "recentGames"})
-    if tbl:
-        row = tbl.find("tr")
-        if row:
-            cols = [td.get_text(strip=True) for td in row.find_all("td")]
-            print(f"[DEBUG] Dernier match (recentGames): {cols}")
-            return {
-                "date": cols[0] if len(cols) > 0 else "",
-                "visitor": cols[1] if len(cols) > 1 else "",
-                "home": cols[2] if len(cols) > 2 else "",
-                "result": cols[3] if len(cols) > 3 else ""
-            }
-    print("[WARN] Aucun dernier match détecté dans le HTML.")
-    return None
+# ===============================================================
+# 🏒 Logo des équipes
+# ===============================================================
+def fetch_team_logo(team_url: str, cache: Dict[str, str]) -> str:
+    """Récupère le logo d’une équipe depuis sa page (avec cache)."""
+    if not team_url:
+        return ""
+    if team_url in cache:
+        return cache[team_url]
+
+    try:
+        print(f"[INFO] Lecture logo: {team_url}")
+        full_url = team_url if team_url.startswith("http") else f"https://page.spordle.com{team_url}"
+        r = requests.get(full_url, timeout=20)
+        if r.status_code != 200:
+            print(f"[WARN] Logo HTTP {r.status_code} sur {team_url}")
+            return ""
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        logo_tag = soup.select_one("img[src*='team'], img[class*='logo'], div[class*='logo'] img")
+        if logo_tag and logo_tag.get("src"):
+            logo = logo_tag["src"]
+            if logo.startswith("/"):
+                logo = f"https://page.spordle.com{logo}"
+            cache[team_url] = logo
+            print(f"[DEBUG] Logo trouvé: {logo}")
+            return logo
+        print(f"[WARN] Aucun logo trouvé sur {team_url}")
+        return ""
+    except Exception as e:
+        print(f"[ERROR] fetch_team_logo: {e}")
+        return ""
 
 # ===============================================================
 # 🚀 MQTT
 # ===============================================================
-def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
-    sensor_id = f"{entity_prefix}_{slug}_{label}"
-    base = f"{discovery_prefix}/sensor/{sensor_id}"
+def mqtt_publish(client, prefix, slug, label, icon, state, attributes):
+    sensor_id = f"{slug}_{label}"
+    base = f"{prefix}/sensor/{sensor_id}"
     cfg_topic = f"{base}/config"
     state_topic = f"{base}/state"
     attr_topic = f"{base}/attributes"
 
     config_payload = {
-        "name": f"SLQNE – {label.replace('_', ' ').title()}",
+        "name": f"SLQNE – {label.title().replace('_',' ')}",
         "uniq_id": sensor_id,
         "stat_t": state_topic,
         "json_attr_t": attr_topic,
@@ -168,7 +165,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
     print(f"[MQTT] Sensor publié: {sensor_id}")
 
 # ===============================================================
-# 🏒 MAIN
+# 🧩 MAIN
 # ===============================================================
 def main():
     parser = argparse.ArgumentParser()
@@ -183,7 +180,7 @@ def main():
 
     teams = json.loads(args.teams_json) if args.teams_json else []
     if not teams:
-        print("[ERREUR] Aucune catégorie configurée.")
+        print("[ERREUR] Aucune équipe/catégorie fournie")
         return
 
     client = mqtt.Client(client_id=f"slqne_hockey_{int(time.time())}")
@@ -193,48 +190,42 @@ def main():
     client.loop_start()
     print("[INFO] Connecté à MQTT")
 
-    base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
+    logo_cache = load_logo_cache()
 
     for team in teams:
         name = team.get("name", "Catégorie")
         league_id = team.get("league_id")
         schedule_id = team.get("schedule_id")
         slug = slugify(name)
+
+        base_url = f"https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings/{league_id}?scheduleId={schedule_id}"
+        standings_url = f"{base_url}&tab=standings"
+        players_url = f"{base_url}&tab=playerstats"
+
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
-            url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
-            html_standings = get_html_selenium(url_standings)
-            standings = parse_standings_multi_division(html_standings)
+            # --- Classement ---
+            html = get_html(standings_url)
+            standings = parse_standings(html)
+            for entry in standings:
+                entry["team_logo"] = fetch_team_logo(entry.get("team_url", ""), logo_cache)
+            save_logo_cache(logo_cache)
 
             mqtt_publish(
-                client, args.discovery_prefix, args.entity_prefix, slug,
-                "classement", "mdi:trophy",
+                client, args.discovery_prefix, slug, "slqne_classement", "mdi:trophy",
                 f"{len(standings)} équipes",
                 {"standings": standings, "updated": now_local_iso()}
             )
 
-            url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
-            html_players = get_html_selenium(url_players)
-            players = parse_table_generic(html_players)
-
+            # --- Stats joueurs ---
+            html_players = get_html(players_url)
+            players = parse_players_stats(html_players)
             mqtt_publish(
-                client, args.discovery_prefix, args.entity_prefix, slug,
-                "stats_joueurs", "mdi:hockey-sticks",
+                client, args.discovery_prefix, slug, "slqne_stats_joueurs", "mdi:hockey-sticks",
                 f"{len(players)} joueurs",
                 {"players": players, "updated": now_local_iso()}
             )
-
-            last_game = detect_last_game(html_standings)
-            if last_game:
-                mqtt_publish(
-                    client, args.discovery_prefix, args.entity_prefix, slug,
-                    "dernier_match", "mdi:hockey-puck",
-                    last_game.get("result", "N/A"),
-                    {"last_game": last_game, "updated": now_local_iso()}
-                )
-            else:
-                print(f"[WARN] Aucun dernier match détecté pour {name}")
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
