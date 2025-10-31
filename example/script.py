@@ -87,7 +87,7 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
 
 
 def parse_logos_from_standings(html: str) -> Dict[str, str]:
-    """Extrait les logos et noms d’équipes du classement."""
+    """🆕 Extrait les logos et noms d’équipes du classement."""
     soup = BeautifulSoup(html, "html.parser")
     logos = {}
     for row in soup.select("tr"):
@@ -116,24 +116,29 @@ def parse_table_generic(html: str) -> List[Dict]:
     print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)")
     return rows
 
-
 # ===============================================================
 # 🔄 Scroll complet pour charger tous les matchs
 # ===============================================================
 def scroll_to_load_all_matches(driver):
+    """
+    Fait défiler toute la page Spordle (et non seulement la liste UL)
+    pour forcer le chargement dynamique de tous les matchs.
+    """
     try:
         last_total = 0
         same_count = 0
-        for i in range(12):
+        for i in range(12):  # jusqu’à 12 cycles de scroll complets
             driver.execute_script("window.scrollBy(0, window.innerHeight);")
             time.sleep(1.2)
             driver.execute_script("window.scrollBy(0, -200);")
             time.sleep(1)
+
             html = driver.page_source
             soup = BeautifulSoup(html, "html.parser")
             matches = soup.select("li[data-event='true']")
             total = len(matches)
             print(f"[DEBUG] Scroll global {i+1}: {total} matchs visibles...")
+
             if total == last_total:
                 same_count += 1
                 if same_count >= 3:
@@ -144,51 +149,6 @@ def scroll_to_load_all_matches(driver):
             last_total = total
     except Exception as e:
         print(f"[WARN] Impossible de scroller pour charger tous les matchs: {e}")
-
-
-# ===============================================================
-# 🧭 Lecture interactive du calendrier (30 derniers jours)
-# ===============================================================
-def get_schedule_html_interactive(url: str) -> str:
-    print(f"[INFO] Ouverture interactive de {url}")
-    driver = setup_driver()
-    driver.get(url)
-
-    try:
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(1.5)
-
-        btn = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
-        )
-        driver.execute_script("arguments[0].click();", btn)
-        print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip()}")
-
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
-        )
-
-        dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
-        items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
-        for item in items:
-            txt = item.text.strip().lower()
-            if "30 derniers jours" in txt:
-                driver.execute_script("arguments[0].click();", item)
-                print("[DEBUG] → Option '30 derniers jours' cliquée.")
-                break
-
-        apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
-        driver.execute_script("arguments[0].click();", apply_button)
-        print("[DEBUG] → Bouton 'Appliquer' cliqué avec succès.")
-
-        scroll_to_load_all_matches(driver)
-    except Exception as e:
-        print(f"[WARN] Interaction dropdown échouée : {e}")
-
-    html = driver.page_source
-    driver.quit()
-    print(f"[DEBUG] Taille du HTML (calendrier après sélection + Appliquer): {len(html)} caractères")
-    return html
 
 
 # ===============================================================
@@ -266,21 +226,12 @@ def main():
                          f"{len(standings)} équipes",
                          {"standings": standings, "updated": now_local_iso()})
 
-            # 🏒 LOGOS
+            # 🆕 LOGOS
             logos = parse_logos_from_standings(html_standings)
             mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
                          "logos_equipes", "mdi:image-outline",
                          f"{len(logos)} logos",
                          {"logos": logos, "updated": now_local_iso()})
-
-            # 📊 STATS JOUEURS
-            url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
-            html_players = get_html_selenium(url_players)
-            players_stats = parse_table_generic(html_players)
-            mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
-                         "stats_joueurs", "mdi:hockey-sticks",
-                         f"{len(players_stats)} joueurs",
-                         {"players": players_stats, "updated": now_local_iso()})
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
