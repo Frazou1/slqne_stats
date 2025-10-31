@@ -115,10 +115,11 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
     html = get_html_selenium(url_schedule)
     soup = BeautifulSoup(html, "html.parser")
 
+    # ✅ Normalisation robuste
     def clean_text(txt):
         txt = ''.join(c for c in unicodedata.normalize('NFD', txt) if unicodedata.category(c) != 'Mn')
-        txt = txt.lower().replace('\u00a0', '').replace('\u200b', '')
-        txt = re.sub(r'\s+', '', txt)
+        txt = txt.lower()
+        txt = re.sub(r'[^a-z0-9]', '', txt)
         return txt
 
     normalized_team = clean_text(team_name)
@@ -149,7 +150,7 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
                 "score_visitor": scores[0],
                 "arena": arena,
                 "raw": " | ".join(teams) + " : " + " - ".join(scores),
-                "match_involving_team": normalized_team in joined
+                "match_involving_team": normalized_team in joined or joined in normalized_team
             }
 
             print(f"[DEBUG] → Comparaison équipe: '{normalized_team}' in '{joined}' = {match['match_involving_team']}")
