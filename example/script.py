@@ -106,28 +106,36 @@ def parse_table_generic(html: str) -> List[Dict]:
 # 🔄 Scroll complet pour charger tous les matchs
 # ===============================================================
 def scroll_to_load_all_matches(driver):
+    """
+    Fait défiler toute la page Spordle (et non seulement la liste UL)
+    pour forcer le chargement dynamique de tous les matchs.
+    """
     try:
-        container = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list-unstyled"))
-        )
-        last_height = 0
+        last_total = 0
         same_count = 0
-        for i in range(10):  # max 10 scrolls
-            driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", container)
-            time.sleep(1.5)
-            new_height = driver.execute_script("return arguments[0].scrollHeight;", container)
-            lis = container.find_elements(By.CSS_SELECTOR, "li[data-event='true']")
-            print(f"[DEBUG] Scroll {i+1}: {len(lis)} matchs chargés, hauteur={new_height}")
-            if new_height == last_height:
+        for i in range(12):  # jusqu’à 12 cycles de scroll complets
+            driver.execute_script("window.scrollBy(0, window.innerHeight);")
+            time.sleep(1.2)
+            driver.execute_script("window.scrollBy(0, -200);")
+            time.sleep(1)
+
+            html = driver.page_source
+            soup = BeautifulSoup(html, "html.parser")
+            matches = soup.select("li[data-event='true']")
+            total = len(matches)
+            print(f"[DEBUG] Scroll global {i+1}: {total} matchs visibles...")
+
+            if total == last_total:
                 same_count += 1
-                if same_count >= 2:
-                    print("[DEBUG] Fin du scroll : plus de nouveaux matchs chargés.")
+                if same_count >= 3:
+                    print("[DEBUG] Fin du scroll : plus de nouveaux matchs détectés.")
                     break
             else:
                 same_count = 0
-            last_height = new_height
+            last_total = total
     except Exception as e:
         print(f"[WARN] Impossible de scroller pour charger tous les matchs: {e}")
+
 
 # ===============================================================
 # 🧭 Lecture interactive du calendrier (30 derniers jours)
