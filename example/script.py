@@ -34,31 +34,28 @@ def get_html_selenium(url: str) -> str:
     print(f"[INFO] Ouverture de {url}")
     driver = setup_driver()
     driver.get(url)
-    time.sleep(4)
+    time.sleep(5)
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
     return html
 
 # ===============================================================
-# 🧠 Parsing
+# 🧠 Parsing : standings / stats joueurs
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
     all_rows = []
     seen_teams = set()
     tables = soup.find_all("table")
-
     if not tables:
         print("[WARN] Aucune table trouvée dans le HTML.")
         return []
-
     for i, table in enumerate(tables, start=1):
         division_name = "Division inconnue"
         prev = table.find_previous(string=re.compile(r"Division", re.I))
         if prev:
             division_name = prev.strip()
-
         headers = [th.get_text(strip=True) for th in table.select("thead th")]
         rows = []
         for tr in table.select("tbody tr"):
@@ -70,11 +67,9 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
                 if team_name and team_name not in seen_teams:
                     rows.append(row)
                     seen_teams.add(team_name)
-
         if len(rows) > 15:
             continue
         all_rows.extend(rows)
-
     print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites")
     return all_rows
 
@@ -92,57 +87,75 @@ def parse_table_generic(html: str) -> List[Dict]:
             rows.append(dict(zip(headers, tds)))
     return rows
 
+# ===============================================================
+# 🏒 Parsing du calendrier (structure en cartes)
+# ===============================================================
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
-    """Récupère le dernier match complété (avec score) pour une équipe donnée."""
+    """Récupère le dernier match complété (avec score) pour une équipe donnée à partir de la structure en cartes (li data-event)."""
     base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
     url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
-    print(f"[INFO] Lecture du calendrier de {team_name}: {url_schedule}")
+    print(f"[INFO] Lecture du calendrier (structure cards) de {team_name}: {url_schedule}")
 
     html = get_html_selenium(url_schedule)
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table")
-    if not table:
-        print("[WARN] Aucun tableau de calendrier trouvé.")
-        return None
 
-    headers = [th.get_text(strip=True) for th in table.select("thead th")]
-    rows = []
-    for tr in table.select("tbody tr"):
-        cols = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(cols) >= len(headers):
-            rows.append(dict(zip(headers, cols)))
+    events = []
+    for date_section in soup.select("li[data-date-section]"):
+        date_title = date_section.find("h4")
+        date_text = date_title.get_text(strip=True) if date_title else ""
 
-    # 🔍 Filtrer les matchs de l'équipe
-    filtered = [r for r in rows if team_name.lower() in " ".join(r.values()).lower()]
-    if not filtered:
-        print(f"[INFO] Aucun match trouvé pour {team_name}")
-        return None
+        for event in date_section.select("li[data-event='true'] article[itemtype='https://schema.org/SportsEvent']"):
+            teams = [t.get_text(strip=True) for t in event.select("article[itemtype='https://schema.org/SportsTeam'] h5")]
+            scores = [s.get_text(strip=True) for s in event.select(".font-brand.font-size-lg")]
+            location = event.find("a", href=re.compile("maps/search"))
+            arena = location.get_text(strip=True) if location else ""
+            final = "FINAL" in event.get_text()
 
-    # 🏁 Garder seulement les matchs avec un score
-    played = [r for r in filtered if re.search(r"\d+-\d+", " ".join(r.values()))]
-    if not played:
-        print(f"[INFO] Aucun match terminé pour {team_name}")
-        return None
-
-    def parse_date(text):
-        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
+            if not teams or len(scores) < 2 or not final:
                 continue
-        return datetime.min
 
-    played.sort(key=lambda x: parse_date(x.get("Date", "")), reverse=True)
-    last = played[0]
-    print(f"[DEBUG] Dernier match trouvé pour {team_name}: {last}")
+            match = {
+                "date": date_text,
+                "home": teams[-1],
+                "visitor": teams[0],
+                "score_home": scores[-1],
+                "score_visitor": scores[0],
+                "arena": arena,
+                "raw": " | ".join(teams) + " : " + " - ".join(scores)
+            }
 
+            if team_name.lower() in " ".join(teams).lower():
+                events.append(match)
+
+    if not events:
+        print(f"[INFO] Aucun match joué trouvé pour {team_name}")
+        return None
+
+    def parse_date(txt):
+        mois = {
+            "janv": 1, "févr": 2, "mars": 3, "avr": 4, "mai": 5, "juin": 6,
+            "juil": 7, "août": 8, "sept": 9, "oct": 10, "nov": 11, "déc": 12
+        }
+        m = re.search(r"(\d{1,2}) (\w+)", txt)
+        if not m:
+            return datetime.min
+        jour = int(m.group(1))
+        mois_txt = m.group(2).lower()[:4]
+        mois_num = mois.get(mois_txt, 1)
+        return datetime(datetime.now().year, mois_num, jour)
+
+    events.sort(key=lambda e: parse_date(e["date"]), reverse=True)
+    last = events[0]
+    score_str = f"{last['score_home']}-{last['score_visitor']}"
+
+    print(f"[DEBUG] Dernier match trouvé pour {team_name}: {last['visitor']} vs {last['home']} ({score_str})")
     return {
-        "date": last.get("Date", ""),
-        "home": last.get("Local") or last.get("Home") or "",
-        "visitor": last.get("Visiteur") or last.get("Visitor") or "",
-        "score": re.search(r"\d+-\d+", " ".join(last.values())).group(0)
-                  if re.search(r"\d+-\d+", " ".join(last.values())) else "",
-        "raw": last
+        "date": last["date"],
+        "home": last["home"],
+        "visitor": last["visitor"],
+        "score": score_str,
+        "arena": last["arena"],
+        "raw": last["raw"]
     }
 
 # ===============================================================
@@ -175,7 +188,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teams-json", default="")
-    parser.add_argument("--players-json", default="")  # ✅ Ajout pour compatibilité run.sh
+    parser.add_argument("--players-json", default="")
     parser.add_argument("--entity_prefix", default="slqne")
     parser.add_argument("--mqtt_host", default="core-mosquitto")
     parser.add_argument("--mqtt_port", default="1883")
@@ -248,7 +261,7 @@ def main():
                              f"{len(filtered_players)} joueur(s)",
                              {"players": filtered_players, "updated": now_local_iso()})
 
-            # --- Dernier match (via calendrier et nom d'équipe) ---
+            # --- Dernier match (calendrier en cartes) ---
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
