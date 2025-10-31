@@ -44,8 +44,7 @@ def get_html_selenium(url: str) -> str:
 # 🧠 Parsing des sections
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
-    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite.
-       Ignore les tableaux dupliqués ou agrégés (mobile)."""
+    """Parse les standings Spordle avec plusieurs divisions, incluant le logo et le lien de chaque équipe."""
     soup = BeautifulSoup(html, "html.parser")
     all_rows = []
     seen_teams = set()
@@ -65,16 +64,41 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
 
         headers = [th.get_text(strip=True) for th in table.select("thead th")]
         rows = []
-        for tr in table.select("tbody tr"):
-            tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-            if len(tds) >= len(headers):
-                row = dict(zip(headers, tds))
-                row["division"] = division_name
-                team_name = row.get("Équipe") or row.get("Equipe") or ""
-                if team_name and team_name not in seen_teams:
-                    rows.append(row)
-                    seen_teams.add(team_name)
 
+        for tr in table.select("tbody tr"):
+            tds = tr.find_all("td")
+            if not tds or len(tds) < len(headers):
+                continue
+
+            row = dict(zip(headers, [td.get_text(strip=True) for td in tds]))
+            row["division"] = division_name
+
+            # --- Extraction logo + lien d’équipe ---
+            team_cell = None
+            for td in tds:
+                if td.find("a", href=True):
+                    team_cell = td
+                    break
+
+            if team_cell:
+                a = team_cell.find("a", href=True)
+                img = a.find("img") if a else None
+                team_url = a["href"] if a else ""
+                team_logo = img["src"] if img and img.has_attr("src") else ""
+                team_name = a.get_text(strip=True)
+
+                # Correction du nom
+                row["Équipe"] = team_name
+                row["team_url"] = f"https://page.spordle.com{team_url}" if team_url.startswith("/") else team_url
+                row["team_logo"] = team_logo
+
+            # Évite doublons
+            team_name_key = row.get("Équipe") or row.get("Equipe") or ""
+            if team_name_key and team_name_key not in seen_teams:
+                seen_teams.add(team_name_key)
+                rows.append(row)
+
+        # Ignore les grands tableaux combinés
         if len(rows) > 15:
             print(f"[DEBUG] Table {i} ignorée ({len(rows)} lignes, probable tableau global).")
             continue
@@ -82,7 +106,7 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
         print(f"[DEBUG] {len(rows)} lignes extraites pour {division_name}")
         all_rows.extend(rows)
 
-    print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites")
+    print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites (avec logos).")
     return all_rows
 
 def parse_table_generic(html: str) -> List[Dict]:
