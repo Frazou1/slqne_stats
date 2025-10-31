@@ -288,12 +288,16 @@ def main():
     client.loop_start()
     print("[INFO] Connecté à MQTT")
 
+    # 🟢 Déterminer si le mode "players" est actif
+    use_players_prefix = bool(players)
+
     for team in teams:
         name = team.get("name")
         league_id = team.get("league_id")
         schedule_id = team.get("schedule_id")
-        slug = slugify(name)
+        slug = "players" if use_players_prefix else slugify(name)
         print(f"[INFO] --- Traitement {name} ---")
+
 
         try:
             # Classement et joueurs
