@@ -2,10 +2,13 @@
 import os, re, json, time, argparse
 from datetime import datetime
 from typing import List, Dict, Optional
-import requests
 from bs4 import BeautifulSoup
 import paho.mqtt.client as mqtt
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
 from zoneinfo import ZoneInfo
+import requests
 
 LOCAL_TZ = "America/Toronto"
 LOGO_CACHE_FILE = "/data/team_logos_cache.json"
@@ -19,18 +22,34 @@ def now_local_iso():
 def slugify(name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
 
-def get_html(url: str) -> str:
-    print(f"[INFO] Téléchargement de la page {url}")
-    r = requests.get(url, timeout=30, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; SLQNEStats/1.1; +https://frazhome.zapto.org)"
-    })
-    if r.status_code != 200:
-        raise RuntimeError(f"Erreur HTTP {r.status_code} sur {url}")
-    print(f"[DEBUG] Taille HTML: {len(r.text)} caractères")
-    return r.text
+# ===============================================================
+# 🧠 Selenium Setup
+# ===============================================================
+def init_driver() -> webdriver.Chrome:
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_argument("--mute-audio")
+
+    driver = webdriver.Chrome(service=Service("/usr/bin/chromedriver"), options=chrome_options)
+    return driver
+
+def get_rendered_html(driver, url: str, wait_time: int = 8) -> str:
+    """Charge la page via Selenium et retourne le HTML complet rendu."""
+    print(f"[INFO] Ouverture de {url}")
+    driver.get(url)
+    time.sleep(wait_time)  # attendre le rendu React
+    html = driver.page_source
+    print(f"[DEBUG] Taille du HTML ({url.split('?')[-1]}): {len(html)} caractères")
+    return html
 
 # ===============================================================
-# 📦 Gestion du cache logo (pour éviter rechargement inutile)
+# 🧩 Cache Logo
 # ===============================================================
 def load_logo_cache() -> Dict[str, str]:
     if os.path.exists(LOGO_CACHE_FILE):
@@ -49,7 +68,7 @@ def save_logo_cache(cache: Dict[str, str]):
         print(f"[WARN] Impossible d’enregistrer le cache logo: {e}")
 
 # ===============================================================
-# 🏒 Extraction du classement multi-division
+# 🏒 Parsing du classement multi-division
 # ===============================================================
 def parse_standings(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -58,15 +77,10 @@ def parse_standings(html: str) -> List[Dict]:
     rows = []
 
     for table in tables:
-        # Repérer la division associée
         division_title = "Inconnue"
-        previous = table.find_previous("h2")
+        previous = table.find_previous(["h2", "h3"])
         if previous:
             division_title = previous.get_text(strip=True)
-        else:
-            h3 = table.find_previous("h3")
-            if h3:
-                division_title = h3.get_text(strip=True)
 
         headers = [th.get_text(strip=True) for th in table.select("thead th")]
         body_rows = table.select("tbody tr")
@@ -78,19 +92,16 @@ def parse_standings(html: str) -> List[Dict]:
                 entry = dict(zip(headers, tds))
                 entry["division"] = division_title
 
-                # Lien vers la page d’équipe
+                # Lien d’équipe
                 team_link = tr.find("a", href=True)
-                entry["team_url"] = (
-                    f"https://page.spordle.com{team_link['href']}"
-                    if team_link else ""
-                )
+                entry["team_url"] = f"https://page.spordle.com{team_link['href']}" if team_link else ""
                 rows.append(entry)
 
     print(f"[DEBUG] Total {len(rows)} lignes multi-division extraites")
     return rows
 
 # ===============================================================
-# 🧠 Stats joueurs
+# 📊 Parsing des stats joueurs
 # ===============================================================
 def parse_players_stats(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -108,10 +119,10 @@ def parse_players_stats(html: str) -> List[Dict]:
     return rows
 
 # ===============================================================
-# 🏒 Logo des équipes
+# 🏒 Récupération du logo d’équipe
 # ===============================================================
 def fetch_team_logo(team_url: str, cache: Dict[str, str]) -> str:
-    """Récupère le logo d’une équipe depuis sa page (avec cache)."""
+    """Récupère le logo d’une équipe (avec cache)."""
     if not team_url:
         return ""
     if team_url in cache:
@@ -191,6 +202,7 @@ def main():
     print("[INFO] Connecté à MQTT")
 
     logo_cache = load_logo_cache()
+    driver = init_driver()
 
     for team in teams:
         name = team.get("name", "Catégorie")
@@ -206,7 +218,7 @@ def main():
 
         try:
             # --- Classement ---
-            html = get_html(standings_url)
+            html = get_rendered_html(driver, standings_url)
             standings = parse_standings(html)
             for entry in standings:
                 entry["team_logo"] = fetch_team_logo(entry.get("team_url", ""), logo_cache)
@@ -219,7 +231,7 @@ def main():
             )
 
             # --- Stats joueurs ---
-            html_players = get_html(players_url)
+            html_players = get_rendered_html(driver, players_url)
             players = parse_players_stats(html_players)
             mqtt_publish(
                 client, args.discovery_prefix, slug, "slqne_stats_joueurs", "mdi:hockey-sticks",
@@ -230,6 +242,7 @@ def main():
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
 
+    driver.quit()
     print("[INFO] Tous les teams traités.")
     client.loop_stop()
     client.disconnect()
