@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import os, re, json, time, argparse, unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 import paho.mqtt.client as mqtt
@@ -117,9 +117,9 @@ def get_schedule_html_interactive(url: str) -> str:
         )
         print(f"[DEBUG] Texte du bouton calendrier initial: {btn.text.strip()}")
         btn.click()
-        time.sleep(1)
+        time.sleep(1.2)
 
-        # Cliquer sur “30 derniers jours”
+        # Sélectionner “30 derniers jours”
         options = driver.find_elements(By.CSS_SELECTOR, "div.dropdown-menu div, button, span, li")
         found = False
         for opt in options:
@@ -132,20 +132,36 @@ def get_schedule_html_interactive(url: str) -> str:
                 break
         if not found:
             print("[WARN] Option '30 derniers jours' introuvable.")
+        else:
+            time.sleep(1.0)
 
-        # 🆕 Cliquer sur “Appliquer”
+        # 🔁 Reouvrir le calendrier pour forcer Spordle à activer “Appliquer”
+        try:
+            driver.find_element(By.CSS_SELECTOR, "body").click()
+            time.sleep(0.8)
+            btn = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-outline-primary"))
+            )
+            btn.click()
+            print("[DEBUG] → Calendrier rouvert avant d'appliquer le filtre.")
+            time.sleep(0.8)
+        except Exception as e:
+            print(f"[WARN] Impossible de rouvrir le calendrier proprement : {e}")
+
+        # Cliquer sur le bouton “Appliquer”
         try:
             footer_apply = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//footer//button[contains(., 'Appliquer')]"))
             )
+            driver.execute_script("arguments[0].scrollIntoView(true);", footer_apply)
             time.sleep(0.5)
             footer_apply.click()
-            print("[DEBUG] → Bouton 'Appliquer' cliqué.")
+            print("[DEBUG] → Bouton 'Appliquer' cliqué (2e tentative).")
         except Exception as e:
             print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
 
-        # Attendre rechargement du calendrier
-        WebDriverWait(driver, 15).until(
+        # Attente du rechargement
+        WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list-unstyled"))
         )
         time.sleep(3)
@@ -159,7 +175,7 @@ def get_schedule_html_interactive(url: str) -> str:
     return html
 
 # ===============================================================
-# 🏒 Parsing du calendrier
+# 🏒 Parsing du calendrier (structure “cards”)
 # ===============================================================
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
     base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
