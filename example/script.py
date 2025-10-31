@@ -103,7 +103,7 @@ def parse_table_generic(html: str) -> List[Dict]:
     return rows
 
 # ===============================================================
-# 🧭 Lecture interactive du calendrier (30 derniers jours)
+# 🧭 Lecture interactive du calendrier (30 derniers jours + Appliquer)
 # ===============================================================
 def get_schedule_html_interactive(url: str) -> str:
     print(f"[INFO] Ouverture interactive de {url}")
@@ -111,47 +111,61 @@ def get_schedule_html_interactive(url: str) -> str:
     driver.get(url)
 
     try:
-        # Attente du bouton du calendrier
+        # Attente du bouton calendrier
         btn = WebDriverWait(driver, 15).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
         print(f"[DEBUG] Texte du bouton calendrier initial: {btn.text.strip()}")
-
-        # Cliquer pour ouvrir le menu
         btn.click()
         time.sleep(1)
 
-        # Chercher et cliquer sur l’option “30 derniers jours”
+        # Cliquer sur “30 derniers jours”
         options = driver.find_elements(By.CSS_SELECTOR, "div.dropdown-menu div, button, span, li")
+        found = False
         for opt in options:
             if "30 derniers jours" in opt.text.lower():
                 driver.execute_script("arguments[0].scrollIntoView(true);", opt)
                 time.sleep(0.5)
                 opt.click()
                 print("[DEBUG] → Option '30 derniers jours' sélectionnée.")
+                found = True
                 break
+        if not found:
+            print("[WARN] Option '30 derniers jours' introuvable.")
 
-        # Attendre rechargement du contenu
+        # 🆕 Cliquer sur “Appliquer”
+        try:
+            footer_apply = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//footer//button[contains(., 'Appliquer')]"))
+            )
+            time.sleep(0.5)
+            footer_apply.click()
+            print("[DEBUG] → Bouton 'Appliquer' cliqué.")
+        except Exception as e:
+            print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
+
+        # Attendre rechargement du calendrier
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list-unstyled"))
         )
         time.sleep(3)
+
     except Exception as e:
         print(f"[WARN] Interaction dropdown échouée : {e}")
 
     html = driver.page_source
     driver.quit()
-    print(f"[DEBUG] Taille du HTML (calendrier après sélection): {len(html)} caractères")
+    print(f"[DEBUG] Taille du HTML (calendrier après sélection + Appliquer): {len(html)} caractères")
     return html
 
 # ===============================================================
-# 🏒 Parsing du calendrier (structure “cards”)
+# 🏒 Parsing du calendrier
 # ===============================================================
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
     base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
     url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
-
     print(f"[INFO] Lecture du calendrier (structure cards) de {team_name}: {url_schedule}")
+
     html = get_schedule_html_interactive(url_schedule)
     soup = BeautifulSoup(html, "html.parser")
 
@@ -293,7 +307,6 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
-            # Classement
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
@@ -303,7 +316,6 @@ def main():
                          f"{len(standings)} équipes",
                          {"standings": standings, "updated": now_local_iso()})
 
-            # Stats joueurs
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players_stats = parse_table_generic(html_players)
@@ -313,7 +325,6 @@ def main():
                          f"{len(players_stats)} joueurs",
                          {"players": players_stats, "updated": now_local_iso()})
 
-            # Dernier match
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
