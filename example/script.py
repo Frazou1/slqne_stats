@@ -44,7 +44,6 @@ def get_html_selenium(url: str) -> str:
 # 🧠 Parsing des sections
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
-    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite."""
     soup = BeautifulSoup(html, "html.parser")
     all_rows = []
     seen_teams = set()
@@ -78,11 +77,11 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
             print(f"[DEBUG] Table {i} ignorée ({len(rows)} lignes, probable tableau global).")
             continue
 
-        print(f"[DEBUG] {len(rows)} lignes extraites pour {division_name}")
         all_rows.extend(rows)
 
     print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites")
     return all_rows
+
 
 def parse_table_generic(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -101,22 +100,60 @@ def parse_table_generic(html: str) -> List[Dict]:
     print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)")
     return rows
 
-def detect_last_game(html: str) -> Optional[Dict]:
+
+def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
+    """Récupère le dernier match complété (avec score) pour une équipe donnée."""
+    base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
+    url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
+    print(f"[INFO] Lecture du calendrier de {team_name}: {url_schedule}")
+
+    html = get_html_selenium(url_schedule)
     soup = BeautifulSoup(html, "html.parser")
-    tbl = soup.find("table", {"id": "recentGames"})
-    if tbl:
-        row = tbl.find("tr")
-        if row:
-            cols = [td.get_text(strip=True) for td in row.find_all("td")]
-            print(f"[DEBUG] Dernier match (recentGames): {cols}")
-            return {
-                "date": cols[0] if len(cols) > 0 else "",
-                "visitor": cols[1] if len(cols) > 1 else "",
-                "home": cols[2] if len(cols) > 2 else "",
-                "result": cols[3] if len(cols) > 3 else ""
-            }
-    print("[WARN] Aucun dernier match détecté dans le HTML.")
-    return None
+    table = soup.find("table")
+    if not table:
+        print("[WARN] Aucun tableau de calendrier trouvé.")
+        return None
+
+    headers = [th.get_text(strip=True) for th in table.select("thead th")]
+    rows = []
+    for tr in table.select("tbody tr"):
+        cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(cols) >= len(headers):
+            rows.append(dict(zip(headers, cols)))
+
+    # 🔍 On garde seulement les matchs impliquant l'équipe
+    filtered = [r for r in rows if team_name.lower() in " ".join(r.values()).lower()]
+    if not filtered:
+        print(f"[INFO] Aucun match trouvé pour {team_name}")
+        return None
+
+    # 🏁 Matchs terminés (avec score)
+    played = [r for r in filtered if re.search(r"\d+-\d+", " ".join(r.values()))]
+    if not played:
+        print(f"[INFO] Aucun match terminé pour {team_name}")
+        return None
+
+    # 🗓️ Tri par date
+    def parse_date(text):
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        return datetime.min
+
+    played.sort(key=lambda x: parse_date(x.get("Date", "")), reverse=True)
+    last = played[0]
+    print(f"[DEBUG] Dernier match trouvé pour {team_name}: {last}")
+
+    return {
+        "date": last.get("Date", ""),
+        "home": last.get("Local") or last.get("Home") or "",
+        "visitor": last.get("Visiteur") or last.get("Visitor") or "",
+        "score": re.search(r"\d+-\d+", " ".join(last.values())).group(0)
+                  if re.search(r"\d+-\d+", " ".join(last.values())) else "",
+        "raw": last
+    }
 
 # ===============================================================
 # 🚀 MQTT
@@ -161,15 +198,13 @@ def main():
     players_followed = json.loads(args.players_json) if args.players_json else []
 
     if not teams:
-        print("[ERREUR] Aucune catégorie configurée.")
+        print("[ERREUR] Aucune équipe configurée.")
         return
 
     if players_followed:
         print(f"[INFO] {len(players_followed)} joueur(s) suivis :")
         for pj in players_followed:
             print(f"   → {pj['player_name']} ({pj['team_name']})")
-    else:
-        print("[INFO] Aucun joueur spécifique à suivre.")
 
     client = mqtt.Client(client_id=f"slqne_hockey_{int(time.time())}")
     if args.mqtt_user:
@@ -188,23 +223,20 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
-            # --- Standings ---
+            # --- Classement ---
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
-            mqtt_publish(
-                client, args.discovery_prefix, args.entity_prefix, slug,
-                "classement", "mdi:trophy",
-                f"{len(standings)} équipes",
-                {"standings": standings, "updated": now_local_iso()}
-            )
+            mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
+                         "classement", "mdi:trophy",
+                         f"{len(standings)} équipes",
+                         {"standings": standings, "updated": now_local_iso()})
 
-            # --- Joueurs (stats) ---
+            # --- Statistiques joueurs ---
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players = parse_table_generic(html_players)
 
-            # Filtrage pour joueurs suivis
             filtered_players = []
             for pj in players_followed:
                 if pj["team_name"].lower() == name.lower():
@@ -213,46 +245,32 @@ def main():
                         if pj["player_name"].lower() in nom_joueur.lower():
                             filtered_players.append(pl)
 
-            mqtt_publish(
-                client, args.discovery_prefix, args.entity_prefix, slug,
-                "stats_joueurs", "mdi:hockey-sticks",
-                f"{len(players)} joueurs",
-                {"players": players, "updated": now_local_iso()}
-            )
+            mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
+                         "stats_joueurs", "mdi:hockey-sticks",
+                         f"{len(players)} joueurs",
+                         {"players": players, "updated": now_local_iso()})
 
             if filtered_players:
-                print(f"[INFO] {len(filtered_players)} joueur(s) suivis trouvés pour {name}")
-                mqtt_publish(
-                    client, args.discovery_prefix, args.entity_prefix, slug,
-                    "playerstats", "mdi:account",
-                    f"{len(filtered_players)} joueur(s)",
-                    {"players": filtered_players, "updated": now_local_iso()}
-                )
-            else:
-                print(f"[INFO] Aucun joueur suivi trouvé dans {name}")
+                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
+                             "playerstats", "mdi:account",
+                             f"{len(filtered_players)} joueur(s)",
+                             {"players": filtered_players, "updated": now_local_iso()})
 
-            # --- Dernier match ---
-            last_game = detect_last_game(html_standings)
+            # --- Dernier match à partir du calendrier ---
+            last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
-                mqtt_publish(
-                    client, args.discovery_prefix, args.entity_prefix, slug,
-                    "dernier_match", "mdi:hockey-puck",
-                    last_game.get("result", "N/A"),
-                    {"last_game": last_game, "updated": now_local_iso()}
-                )
+                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
+                             "dernier_match", "mdi:hockey-puck",
+                             last_game.get("score", "N/A"),
+                             {"last_game": last_game, "updated": now_local_iso()})
 
-                # Publier aussi par joueur si équipe suivie
                 for pj in players_followed:
                     if pj["team_name"].lower() == name.lower():
-                        mqtt_publish(
-                            client, args.discovery_prefix, args.entity_prefix,
-                            slugify(pj["player_name"]),
-                            "dernier_match", "mdi:hockey-puck",
-                            last_game.get("result", "N/A"),
-                            {"player": pj["player_name"], "last_game": last_game, "updated": now_local_iso()}
-                        )
-            else:
-                print(f"[WARN] Aucun dernier match détecté pour {name}")
+                        mqtt_publish(client, args.discovery_prefix, args.entity_prefix,
+                                     slugify(pj["player_name"]),
+                                     "dernier_match", "mdi:hockey-puck",
+                                     last_game.get("score", "N/A"),
+                                     {"player": pj["player_name"], "last_game": last_game, "updated": now_local_iso()})
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
