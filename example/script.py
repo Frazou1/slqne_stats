@@ -41,7 +41,7 @@ def get_html_selenium(url: str) -> str:
     return html
 
 # ===============================================================
-# 🧠 Parsing des sections
+# 🧠 Parsing
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -52,8 +52,6 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
     if not tables:
         print("[WARN] Aucune table trouvée dans le HTML.")
         return []
-
-    print(f"[DEBUG] {len(tables)} tables trouvées dans la page standings")
 
     for i, table in enumerate(tables, start=1):
         division_name = "Division inconnue"
@@ -74,14 +72,11 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
                     seen_teams.add(team_name)
 
         if len(rows) > 15:
-            print(f"[DEBUG] Table {i} ignorée ({len(rows)} lignes, probable tableau global).")
             continue
-
         all_rows.extend(rows)
 
     print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites")
     return all_rows
-
 
 def parse_table_generic(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
@@ -89,17 +84,13 @@ def parse_table_generic(html: str) -> List[Dict]:
     if not table:
         print("[WARN] Aucune table trouvée dans la page.")
         return []
-
     headers = [th.get_text(strip=True) for th in table.select("thead th")]
     rows = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
         if len(tds) >= len(headers):
             rows.append(dict(zip(headers, tds)))
-
-    print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)")
     return rows
-
 
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
     """Récupère le dernier match complété (avec score) pour une équipe donnée."""
@@ -121,19 +112,18 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
         if len(cols) >= len(headers):
             rows.append(dict(zip(headers, cols)))
 
-    # 🔍 On garde seulement les matchs impliquant l'équipe
+    # 🔍 Filtrer les matchs de l'équipe
     filtered = [r for r in rows if team_name.lower() in " ".join(r.values()).lower()]
     if not filtered:
         print(f"[INFO] Aucun match trouvé pour {team_name}")
         return None
 
-    # 🏁 Matchs terminés (avec score)
+    # 🏁 Garder seulement les matchs avec un score
     played = [r for r in filtered if re.search(r"\d+-\d+", " ".join(r.values()))]
     if not played:
         print(f"[INFO] Aucun match terminé pour {team_name}")
         return None
 
-    # 🗓️ Tri par date
     def parse_date(text):
         for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
             try:
@@ -185,7 +175,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teams-json", default="")
-    parser.add_argument("--players-json", default="")
+    parser.add_argument("--players-json", default="")  # ✅ Ajout pour compatibilité run.sh
     parser.add_argument("--entity_prefix", default="slqne")
     parser.add_argument("--mqtt_host", default="core-mosquitto")
     parser.add_argument("--mqtt_port", default="1883")
@@ -205,6 +195,8 @@ def main():
         print(f"[INFO] {len(players_followed)} joueur(s) suivis :")
         for pj in players_followed:
             print(f"   → {pj['player_name']} ({pj['team_name']})")
+    else:
+        print("[INFO] Aucun joueur spécifique à suivre.")
 
     client = mqtt.Client(client_id=f"slqne_hockey_{int(time.time())}")
     if args.mqtt_user:
@@ -256,7 +248,7 @@ def main():
                              f"{len(filtered_players)} joueur(s)",
                              {"players": filtered_players, "updated": now_local_iso()})
 
-            # --- Dernier match à partir du calendrier ---
+            # --- Dernier match (via calendrier et nom d'équipe) ---
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
