@@ -107,7 +107,20 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
     html = get_html_selenium(url_schedule)
     soup = BeautifulSoup(html, "html.parser")
 
-    events = []
+    def clean_text(txt):
+        # enlève accents, espaces insécables et caractères non imprimables
+        txt = ''.join(
+            c for c in unicodedata.normalize('NFD', txt)
+            if unicodedata.category(c) != 'Mn'
+        )
+        txt = txt.lower()
+        txt = txt.replace('\u00a0', '').replace('\u200b', '')  # espace insécable et zéro-width
+        txt = re.sub(r'\s+', '', txt)
+        return txt
+
+    normalized_team = clean_text(team_name)
+    all_events = []
+
     for date_section in soup.select("li[data-date-section]"):
         date_title = date_section.find("h4")
         date_text = date_title.get_text(strip=True) if date_title else ""
@@ -119,9 +132,13 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
             arena = location.get_text(strip=True) if location else ""
             final = "FINAL" in event.get_text()
 
+            # --- Debug complet pour chaque match trouvé ---
+            print(f"[DEBUG] Match détecté: {date_text} | {teams} | scores={scores} | arena={arena} | final={final}")
+
             if not teams or len(scores) < 2 or not final:
                 continue
 
+            joined = clean_text("".join(teams))
             match = {
                 "date": date_text,
                 "home": teams[-1],
@@ -129,13 +146,20 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
                 "score_home": scores[-1],
                 "score_visitor": scores[0],
                 "arena": arena,
-                "raw": " | ".join(teams) + " : " + " - ".join(scores)
+                "raw": " | ".join(teams) + " : " + " - ".join(scores),
+                "match_involving_team": normalized_team in joined
             }
 
-            if normalize(team_name) in normalize("".join(teams)):
-                events.append(match)
+            print(f"[DEBUG] → Comparaison équipe: '{normalized_team}' in '{joined}' = {match['match_involving_team']}")
 
-    if not events:
+            all_events.append(match)
+
+    print(f"[DEBUG] Total {len(all_events)} matchs détectés au total sur la page.")
+
+    # On filtre uniquement les matchs qui concernent l'équipe
+    team_events = [m for m in all_events if m["match_involving_team"]]
+
+    if not team_events:
         print(f"[INFO] Aucun match joué trouvé pour {team_name}")
         return None
 
@@ -153,11 +177,11 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
         mois_num = mois.get(mois_txt, 1)
         return datetime(datetime.now().year, mois_num, jour)
 
-    events.sort(key=lambda e: parse_date(e["date"]), reverse=True)
-    last = events[0]
+    team_events.sort(key=lambda e: parse_date(e["date"]), reverse=True)
+    last = team_events[0]
     score_str = f"{last['score_home']}-{last['score_visitor']}"
 
-    print(f"[DEBUG] Dernier match trouvé pour {team_name}: {last['visitor']} vs {last['home']} ({score_str})")
+    print(f"[DEBUG] ✅ Dernier match trouvé pour {team_name}: {last['visitor']} vs {last['home']} ({score_str})")
     return {
         "date": last["date"],
         "home": last["home"],
@@ -166,6 +190,7 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
         "arena": last["arena"],
         "raw": last["raw"]
     }
+
 
 # ===============================================================
 # 🚀 MQTT
