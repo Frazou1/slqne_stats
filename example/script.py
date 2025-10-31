@@ -103,7 +103,7 @@ def parse_table_generic(html: str) -> List[Dict]:
     return rows
 
 # ===============================================================
-# 🧭 Lecture interactive du calendrier (30 derniers jours + Appliquer)
+# 🧭 Lecture interactive du calendrier (sélection “30 derniers jours” + clic “Appliquer”)
 # ===============================================================
 def get_schedule_html_interactive(url: str) -> str:
     print(f"[INFO] Ouverture interactive de {url}")
@@ -111,56 +111,58 @@ def get_schedule_html_interactive(url: str) -> str:
     driver.get(url)
 
     try:
-        # Attente du bouton calendrier
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1.5)
+
+        # 1️⃣ Ouverture du dropdown
         btn = WebDriverWait(driver, 15).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
         print(f"[DEBUG] Texte du bouton calendrier initial: {btn.text.strip()}")
-        btn.click()
-        time.sleep(1.2)
+        driver.execute_script("arguments[0].click();", btn)
+        time.sleep(1)
 
-        # Sélectionner “30 derniers jours”
-        options = driver.find_elements(By.CSS_SELECTOR, "div.dropdown-menu div, button, span, li")
+        # 2️⃣ Trouver le menu actif
+        dropdown = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
+        )
+
+        # 3️⃣ Cliquer sur "30 derniers jours"
+        items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
         found = False
-        for opt in options:
-            if "30 derniers jours" in opt.text.lower():
-                driver.execute_script("arguments[0].scrollIntoView(true);", opt)
-                time.sleep(0.5)
-                opt.click()
-                print("[DEBUG] → Option '30 derniers jours' sélectionnée.")
+        for item in items:
+            txt = item.text.strip().lower()
+            if "30 derniers jours" in txt:
+                driver.execute_script("arguments[0].scrollIntoView(true);", item)
+                time.sleep(0.3)
+                driver.execute_script("arguments[0].click();", item)
+                print("[DEBUG] → Option '30 derniers jours' cliquée dans le menu déroulant.")
                 found = True
                 break
         if not found:
-            print("[WARN] Option '30 derniers jours' introuvable.")
-        else:
-            time.sleep(1.0)
+            print("[WARN] Option '30 derniers jours' non trouvée dans le menu déroulant.")
+            return driver.page_source
 
-        # 🔁 Reouvrir le calendrier pour forcer Spordle à activer “Appliquer”
+        # 4️⃣ Attendre que le calendrier affiche la plage sélectionnée
         try:
-            driver.find_element(By.CSS_SELECTOR, "body").click()
-            time.sleep(0.8)
-            btn = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-outline-primary"))
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "#date-picker [data-in-range='true']"))
             )
-            btn.click()
-            print("[DEBUG] → Calendrier rouvert avant d'appliquer le filtre.")
-            time.sleep(0.8)
-        except Exception as e:
-            print(f"[WARN] Impossible de rouvrir le calendrier proprement : {e}")
+            print("[DEBUG] → Le calendrier montre bien la plage de dates sélectionnée.")
+        except Exception:
+            print("[WARN] Aucun jour marqué 'in-range' détecté après la sélection.")
 
-        # Cliquer sur le bouton “Appliquer”
+        # 5️⃣ Cliquer sur le bouton "Appliquer"
         try:
-            footer_apply = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//footer//button[contains(., 'Appliquer')]"))
-            )
-            driver.execute_script("arguments[0].scrollIntoView(true);", footer_apply)
+            apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
+            driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
             time.sleep(0.5)
-            footer_apply.click()
-            print("[DEBUG] → Bouton 'Appliquer' cliqué (2e tentative).")
+            driver.execute_script("arguments[0].click();", apply_button)
+            print("[DEBUG] → Bouton 'Appliquer' cliqué avec succès.")
         except Exception as e:
             print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
 
-        # Attente du rechargement
+        # 6️⃣ Attendre rechargement
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list-unstyled"))
         )
