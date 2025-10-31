@@ -44,8 +44,7 @@ def get_html_selenium(url: str) -> str:
 # 🧠 Parsing des sections
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
-    """Parse les standings Spordle avec plusieurs divisions même sans <h2>/<h3> explicite.
-       Ignore les tableaux dupliqués ou agrégés (mobile)."""
+    """Analyse les standings multi-division Spordle"""
     soup = BeautifulSoup(html, "html.parser")
     all_rows = []
     seen_teams = set()
@@ -86,6 +85,7 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
     return all_rows
 
 def parse_table_generic(html: str) -> List[Dict]:
+    """Analyse un tableau standard (ex. playerstats)"""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
@@ -102,22 +102,53 @@ def parse_table_generic(html: str) -> List[Dict]:
     print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)")
     return rows
 
-def detect_last_game(html: str) -> Optional[Dict]:
+def parse_schedule_games(html: str) -> Dict[str, Optional[Dict]]:
+    """Analyse le calendrier des matchs depuis la page ?tab=schedule"""
     soup = BeautifulSoup(html, "html.parser")
-    tbl = soup.find("table", {"id": "recentGames"})
-    if tbl:
-        row = tbl.find("tr")
-        if row:
-            cols = [td.get_text(strip=True) for td in row.find_all("td")]
-            print(f"[DEBUG] Dernier match (recentGames): {cols}")
-            return {
-                "date": cols[0] if len(cols) > 0 else "",
-                "visitor": cols[1] if len(cols) > 1 else "",
-                "home": cols[2] if len(cols) > 2 else "",
-                "result": cols[3] if len(cols) > 3 else ""
-            }
-    print("[WARN] Aucun dernier match détecté dans le HTML.")
-    return None
+    games = {"last": None, "next": None}
+
+    rows = soup.select("table tbody tr")
+    if not rows:
+        print("[WARN] Aucun match trouvé sur la page schedule.")
+        return games
+
+    parsed = []
+    for tr in rows:
+        cols = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(cols) >= 4:
+            parsed.append({
+                "date": cols[0],
+                "visitor": cols[1],
+                "home": cols[2],
+                "result": cols[3]
+            })
+
+    if not parsed:
+        print("[WARN] Aucun match valide détecté (structure inconnue).")
+        return games
+
+    def to_dt(entry):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(entry["date"], fmt)
+            except Exception:
+                continue
+        return datetime.now()
+
+    parsed.sort(key=to_dt)
+    now = datetime.now()
+
+    past = [m for m in parsed if to_dt(m) <= now and m.get("result")]
+    future = [m for m in parsed if to_dt(m) > now]
+
+    if past:
+        games["last"] = past[-1]
+    if future:
+        games["next"] = future[0]
+
+    print(f"[DEBUG] Dernier match: {games['last']}")
+    print(f"[DEBUG] Prochain match: {games['next']}")
+    return games
 
 # ===============================================================
 # 🚀 MQTT
@@ -179,10 +210,10 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
+            # --- Classement ---
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
-
             mqtt_publish(
                 client, args.discovery_prefix, args.entity_prefix, slug,
                 "classement", "mdi:trophy",
@@ -190,10 +221,10 @@ def main():
                 {"standings": standings, "updated": now_local_iso()}
             )
 
+            # --- Statistiques joueurs ---
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players = parse_table_generic(html_players)
-
             mqtt_publish(
                 client, args.discovery_prefix, args.entity_prefix, slug,
                 "stats_joueurs", "mdi:hockey-sticks",
@@ -201,16 +232,30 @@ def main():
                 {"players": players, "updated": now_local_iso()}
             )
 
-            last_game = detect_last_game(html_standings)
-            if last_game:
+            # --- Calendrier (dernier et prochain match) ---
+            url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
+            html_schedule = get_html_selenium(url_schedule)
+            games = parse_schedule_games(html_schedule)
+
+            if games.get("last"):
                 mqtt_publish(
                     client, args.discovery_prefix, args.entity_prefix, slug,
                     "dernier_match", "mdi:hockey-puck",
-                    last_game.get("result", "N/A"),
-                    {"last_game": last_game, "updated": now_local_iso()}
+                    games["last"].get("result", "N/A"),
+                    {"last_game": games["last"], "updated": now_local_iso()}
                 )
             else:
-                print(f"[WARN] Aucun dernier match détecté pour {name}")
+                print(f"[WARN] Aucun dernier match trouvé pour {name}")
+
+            if games.get("next"):
+                mqtt_publish(
+                    client, args.discovery_prefix, args.entity_prefix, slug,
+                    "prochain_match", "mdi:calendar-clock",
+                    games["next"].get("date", "N/A"),
+                    {"next_game": games["next"], "updated": now_local_iso()}
+                )
+            else:
+                print(f"[WARN] Aucun prochain match trouvé pour {name}")
 
         except Exception as e:
             print(f"[ERREUR] {name}: {e}")
