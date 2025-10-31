@@ -7,6 +7,9 @@ import paho.mqtt.client as mqtt
 from zoneinfo import ZoneInfo
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 LOCAL_TZ = "America/Toronto"
 
@@ -100,22 +103,58 @@ def parse_table_generic(html: str) -> List[Dict]:
     return rows
 
 # ===============================================================
+# 🧭 Lecture interactive du calendrier (30 derniers jours)
+# ===============================================================
+def get_schedule_html_interactive(url: str) -> str:
+    print(f"[INFO] Ouverture interactive de {url}")
+    driver = setup_driver()
+    driver.get(url)
+
+    try:
+        # Attente du bouton du calendrier
+        btn = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "button.btn-outline-primary"))
+        )
+        print(f"[DEBUG] Texte du bouton calendrier initial: {btn.text.strip()}")
+
+        # Cliquer pour ouvrir le menu
+        btn.click()
+        time.sleep(1)
+
+        # Chercher et cliquer sur l’option “30 derniers jours”
+        options = driver.find_elements(By.CSS_SELECTOR, "div.dropdown-menu div, button, span, li")
+        for opt in options:
+            if "30 derniers jours" in opt.text.lower():
+                driver.execute_script("arguments[0].scrollIntoView(true);", opt)
+                time.sleep(0.5)
+                opt.click()
+                print("[DEBUG] → Option '30 derniers jours' sélectionnée.")
+                break
+
+        # Attendre rechargement du contenu
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "ul.list-unstyled"))
+        )
+        time.sleep(3)
+    except Exception as e:
+        print(f"[WARN] Interaction dropdown échouée : {e}")
+
+    html = driver.page_source
+    driver.quit()
+    print(f"[DEBUG] Taille du HTML (calendrier après sélection): {len(html)} caractères")
+    return html
+
+# ===============================================================
 # 🏒 Parsing du calendrier (structure “cards”)
 # ===============================================================
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
     base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=30)
-    url_schedule = (
-        f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
-        f"&start={start_date.strftime('%Y-%m-%d')}&end={end_date.strftime('%Y-%m-%d')}"
-    )
-    print(f"[INFO] Lecture du calendrier (structure cards) de {team_name}: {url_schedule}")
+    url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
 
-    html = get_html_selenium(url_schedule)
+    print(f"[INFO] Lecture du calendrier (structure cards) de {team_name}: {url_schedule}")
+    html = get_schedule_html_interactive(url_schedule)
     soup = BeautifulSoup(html, "html.parser")
 
-    # ✅ Normalisation robuste
     def clean_text(txt):
         txt = ''.join(c for c in unicodedata.normalize('NFD', txt) if unicodedata.category(c) != 'Mn')
         txt = txt.lower()
@@ -216,7 +255,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teams-json", default="")
-    parser.add_argument("--players-json", default="")   # ✅ compatibilité restaurée
+    parser.add_argument("--players-json", default="")
     parser.add_argument("--entity_prefix", default="slqne")
     parser.add_argument("--mqtt_host", default="core-mosquitto")
     parser.add_argument("--mqtt_port", default="1883")
@@ -254,6 +293,7 @@ def main():
         print(f"[INFO] --- Traitement catégorie {name} ---")
 
         try:
+            # Classement
             url_standings = f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}"
             html_standings = get_html_selenium(url_standings)
             standings = parse_standings_multi_division(html_standings)
@@ -263,6 +303,7 @@ def main():
                          f"{len(standings)} équipes",
                          {"standings": standings, "updated": now_local_iso()})
 
+            # Stats joueurs
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
             players_stats = parse_table_generic(html_players)
@@ -272,6 +313,7 @@ def main():
                          f"{len(players_stats)} joueurs",
                          {"players": players_stats, "updated": now_local_iso()})
 
+            # Dernier match
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
