@@ -41,12 +41,11 @@ def get_html_selenium(url: str) -> str:
     return html
 
 # ===============================================================
-# 🧠 Parsing des standings et joueurs
+# 🧠 Parsing standings et stats joueurs
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "html.parser")
-    all_rows = []
-    seen_teams = set()
+    all_rows, seen_teams = [], set()
     tables = soup.find_all("table")
 
     if not tables:
@@ -104,7 +103,6 @@ def parse_table_generic(html: str) -> List[Dict]:
 # 🏒 Parsing du calendrier (structure “cards”)
 # ===============================================================
 def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str) -> Optional[Dict]:
-    """Récupère le dernier match FINAL pour une équipe donnée."""
     base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
     end_date = datetime.now()
     start_date = end_date - timedelta(days=30)
@@ -137,7 +135,6 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
             arena = location.get_text(strip=True) if location else ""
             final = "FINAL" in event.get_text()
 
-            # --- Debug complet ---
             print(f"[DEBUG] Match détecté: {date_text} | {teams} | scores={scores} | arena={arena} | final={final}")
 
             if not teams or len(scores) < 2 or not final:
@@ -159,7 +156,6 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
             all_events.append(match)
 
     print(f"[DEBUG] Total {len(all_events)} matchs détectés au total sur la page.")
-
     team_events = [m for m in all_events if m["match_involving_team"]]
 
     if not team_events:
@@ -179,7 +175,6 @@ def get_last_game_from_schedule(league_id: str, schedule_id: str, team_name: str
     team_events.sort(key=lambda e: parse_date(e["date"]), reverse=True)
     last = team_events[0]
     score_str = f"{last['score_home']}-{last['score_visitor']}"
-
     print(f"[DEBUG] ✅ Dernier match trouvé pour {team_name}: {last['visitor']} vs {last['home']} ({score_str})")
     return {
         "date": last["date"],
@@ -220,6 +215,7 @@ def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, sta
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teams-json", default="")
+    parser.add_argument("--players-json", default="")   # ✅ compatibilité restaurée
     parser.add_argument("--entity_prefix", default="slqne")
     parser.add_argument("--mqtt_host", default="core-mosquitto")
     parser.add_argument("--mqtt_port", default="1883")
@@ -229,6 +225,13 @@ def main():
     args = parser.parse_args()
 
     teams = json.loads(args.teams_json) if args.teams_json else []
+    players = json.loads(args.players_json) if args.players_json else []
+
+    if players:
+        print(f"[INFO] {len(players)} joueur(s) suivis :")
+        for p in players:
+            print(f"   → {p.get('player_name','?')} ({p.get('team_name','?')})")
+
     if not teams:
         print("[ERREUR] Aucune catégorie configurée.")
         return
@@ -261,12 +264,12 @@ def main():
 
             url_players = f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}"
             html_players = get_html_selenium(url_players)
-            players = parse_table_generic(html_players)
+            players_stats = parse_table_generic(html_players)
 
             mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug,
                          "stats_joueurs", "mdi:hockey-sticks",
-                         f"{len(players)} joueurs",
-                         {"players": players, "updated": now_local_iso()})
+                         f"{len(players_stats)} joueurs",
+                         {"players": players_stats, "updated": now_local_iso()})
 
             last_game = get_last_game_from_schedule(league_id, schedule_id, name)
             if last_game:
