@@ -99,10 +99,6 @@ def parse_table_generic(html: str) -> List[Dict]:
 # 🔄 Scroll global pour charger tous les matchs Spordle
 # ===============================================================
 def scroll_to_load_all_matches(driver):
-    """
-    Fait défiler la page principale pour déclencher le chargement dynamique
-    de tous les matchs (et non seulement le premier bloc).
-    """
     try:
         last_total = 0
         same_count = 0
@@ -140,7 +136,6 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
     time.sleep(1.5)
 
     try:
-        # Trouver et cliquer sur le bouton calendrier
         btn = WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
@@ -153,7 +148,6 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
         )
         print("[DEBUG] Menu déroulant du calendrier ouvert.")
 
-        # Cliquer sur le filtre voulu
         dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
         items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
         for item in items:
@@ -165,7 +159,6 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
                 break
 
         time.sleep(1)
-        # Clic sur "Appliquer"
         try:
             apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
             driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
@@ -288,50 +281,88 @@ def main():
     client.loop_start()
     print("[INFO] Connecté à MQTT")
 
-    # 🟢 Déterminer si le mode "players" est actif
-    use_players_prefix = bool(players)
+    # 🟢 Mode joueur : publier selon player_name au lieu du team_name
+    if players:
+        for player in players:
+            player_name = player.get("player_name", "").strip()
+            team_name = player.get("team_name", "").strip()
+            slug = slugify(player_name)
+            print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---")
 
-    for team in teams:
-        name = team.get("name")
-        league_id = team.get("league_id")
-        schedule_id = team.get("schedule_id")
-        slug = "players" if use_players_prefix else slugify(name)
-        print(f"[INFO] --- Traitement {name} ---")
+            team_info = next((t for t in teams if t.get("name") == team_name), None)
+            if not team_info:
+                print(f"[WARN] Aucune équipe trouvée pour {team_name}")
+                continue
 
+            league_id = team_info.get("league_id")
+            schedule_id = team_info.get("schedule_id")
 
-        try:
-            # Classement et joueurs
-            base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
-            html_standings = get_html_selenium(f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}")
-            standings = parse_standings_multi_division(html_standings)
-            mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
-                         f"{len(standings)} équipes", {"standings": standings, "updated": now_local_iso()})
+            try:
+                base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
+                html_standings = get_html_selenium(f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}")
+                standings = parse_standings_multi_division(html_standings)
+                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
+                             f"{len(standings)} équipes", {"standings": standings, "updated": now_local_iso()})
 
-            html_players = get_html_selenium(f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}")
-            players_stats = parse_table_generic(html_players)
-            mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
-                         f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
+                html_players = get_html_selenium(f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}")
+                players_stats = parse_table_generic(html_players)
+                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
+                             f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
 
-            # Dernier match (30 derniers jours)
-            matchs_passes = get_games_from_schedule(league_id, schedule_id, name, "30 derniers jours")
-            if matchs_passes:
-                last = matchs_passes[-1]
-                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
-                             f"{last['score_home']}-{last['score_visitor']}",
-                             {"match": last, "updated": now_local_iso()})
+                matchs_passes = get_games_from_schedule(league_id, schedule_id, team_name, "30 derniers jours")
+                if matchs_passes:
+                    last = matchs_passes[-1]
+                    mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
+                                 f"{last['score_home']}-{last['score_visitor']}",
+                                 {"match": last, "updated": now_local_iso()})
 
-            # Prochain match (30 prochains jours)
-            matchs_futurs = get_games_from_schedule(league_id, schedule_id, name, "30 prochains jours")
-            if matchs_futurs:
-                next_match = matchs_futurs[0]
-                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
-                             f"{next_match['visitor']} vs {next_match['home']}",
-                             {"match": next_match, "updated": now_local_iso()})
+                matchs_futurs = get_games_from_schedule(league_id, schedule_id, team_name, "30 prochains jours")
+                if matchs_futurs:
+                    next_match = matchs_futurs[0]
+                    mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
+                                 f"{next_match['visitor']} vs {next_match['home']}",
+                                 {"match": next_match, "updated": now_local_iso()})
+            except Exception as e:
+                print(f"[ERREUR] {player_name}: {e}")
 
-        except Exception as e:
-            print(f"[ERREUR] {name}: {e}")
+    else:
+        # 🟠 Mode normal : par équipe
+        for team in teams:
+            name = team.get("name")
+            league_id = team.get("league_id")
+            schedule_id = team.get("schedule_id")
+            slug = slugify(name)
+            print(f"[INFO] --- Traitement {name} ---")
 
-    print("[INFO] Tous les teams traités.")
+            try:
+                base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
+                html_standings = get_html_selenium(f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}")
+                standings = parse_standings_multi_division(html_standings)
+                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
+                             f"{len(standings)} équipes", {"standings": standings, "updated": now_local_iso()})
+
+                html_players = get_html_selenium(f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}")
+                players_stats = parse_table_generic(html_players)
+                mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
+                             f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
+
+                matchs_passes = get_games_from_schedule(league_id, schedule_id, name, "30 derniers jours")
+                if matchs_passes:
+                    last = matchs_passes[-1]
+                    mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
+                                 f"{last['score_home']}-{last['score_visitor']}",
+                                 {"match": last, "updated": now_local_iso()})
+
+                matchs_futurs = get_games_from_schedule(league_id, schedule_id, name, "30 prochains jours")
+                if matchs_futurs:
+                    next_match = matchs_futurs[0]
+                    mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
+                                 f"{next_match['visitor']} vs {next_match['home']}",
+                                 {"match": next_match, "updated": now_local_iso()})
+            except Exception as e:
+                print(f"[ERREUR] {name}: {e}")
+
+    print("[INFO] Tous les sensors publiés.")
     client.loop_stop()
     client.disconnect()
 
