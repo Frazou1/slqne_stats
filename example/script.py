@@ -36,7 +36,7 @@ def get_html_selenium(url: str) -> str:
     print(f"[INFO] Ouverture de {url}")
     driver = setup_driver()
     driver.get(url)
-    time.sleep(7)  # ↑ 4 → 7s : laisser le temps aux tables/SPAs de s'injecter
+    time.sleep(7)  # délai augmenté pour laisser la page se stabiliser
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
@@ -102,11 +102,11 @@ def scroll_to_load_all_matches(driver):
     try:
         last_total = 0
         same_count = 0
-        for i in range(20):  # ↑ 15 → 20
+        for i in range(20):  # augmenté
             driver.execute_script("window.scrollBy(0, window.innerHeight);")
-            time.sleep(1.6)   # ↑ 1.2 → 1.6
+            time.sleep(1.6)   # augmenté
             driver.execute_script("window.scrollBy(0, -150);")
-            time.sleep(1.2)   # ↑ 0.8 → 1.2
+            time.sleep(1.2)   # augmenté
 
             html = driver.page_source
             soup = BeautifulSoup(html, "html.parser")
@@ -133,21 +133,21 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
     driver = setup_driver()
     driver.get(url)
     driver.execute_script("window.scrollTo(0, 0);")
-    time.sleep(3.0)  # ↑ 1.5 → 3.0 : laisser le calendrier se préparer
+    time.sleep(3.0)  # augmenté
 
     try:
-        btn = WebDriverWait(driver, 25).until(  # ↑ 15 → 25
+        btn = WebDriverWait(driver, 25).until(  # augmenté
             EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
         driver.execute_script("arguments[0].scrollIntoView(true);", btn)
         driver.execute_script("arguments[0].click();", btn)
         print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip() if btn.text else 'Chargement...'}")
 
-        WebDriverWait(driver, 20).until(  # ↑ 10 → 20
+        WebDriverWait(driver, 20).until(  # augmenté
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
         )
         print("[DEBUG] Menu déroulant du calendrier ouvert.")
-        time.sleep(0.8)  # petit délai de grâce
+        time.sleep(0.8)
 
         dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
         items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
@@ -159,7 +159,7 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
                 print(f"[DEBUG] → Option '{filtre}' sélectionnée.")
                 break
 
-        time.sleep(2.0)  # ↑ 1 → 2.0 : laisser le choix s'appliquer
+        time.sleep(2.0)  # augmenté
         try:
             apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
             driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
@@ -168,14 +168,13 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
         except Exception as e:
             print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
 
-        # Laisser la liste de matchs se recharger avant le scroll
-        time.sleep(2.0)  # nouveau délai
+        time.sleep(2.0)  # nouveau délai avant le scroll
         scroll_to_load_all_matches(driver)
 
     except Exception as e:
         print(f"[WARN] Interaction dropdown échouée : {e}")
 
-    time.sleep(1.0)  # petit délai final avant capture
+    time.sleep(1.0)  # petit délai final
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML après sélection: {len(html)} caractères")
@@ -236,9 +235,7 @@ def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, pe
 def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
     sensor_id = f"{entity_prefix}_{slug}_{label}"
     base = f"{discovery_prefix}/sensor/{sensor_id}"
-    cfg_topic = f"{base}/config}"
-    # Correction: éviter accolade perdue (si tu l’avais déjà correct, garde l’original)
-    cfg_topic = f"{base}/config"
+    cfg_topic = f"{base}/config"      # corrigé
     state_topic = f"{base}/state"
     attr_topic = f"{base}/attributes"
 
@@ -298,7 +295,7 @@ def main():
             def normalize(s): return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFD", s or "").lower())
             team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
 
-            # ➜ IDs priorisés par joueur + alias (league_id|league_uuid|leagueId|league ; schedule_id|scheduleId|schedule)
+            # IDs priorisés par joueur + alias permis
             player_league_id = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or player.get("league")
             player_schedule_id = player.get("schedule_id") or player.get("scheduleId") or player.get("schedule")
 
