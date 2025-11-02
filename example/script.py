@@ -36,7 +36,7 @@ def get_html_selenium(url: str) -> str:
     print(f"[INFO] Ouverture de {url}")
     driver = setup_driver()
     driver.get(url)
-    time.sleep(7)  # délai augmenté pour laisser la page se stabiliser
+    time.sleep(15)  # délai augmenté pour laisser la page se stabiliser
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
@@ -102,7 +102,7 @@ def scroll_to_load_all_matches(driver):
     try:
         last_total = 0
         same_count = 0
-        for i in range(20):  # augmenté
+        for i in range(25):  # augmenté
             driver.execute_script("window.scrollBy(0, window.innerHeight);")
             time.sleep(1.6)   # augmenté
             driver.execute_script("window.scrollBy(0, -150);")
@@ -143,7 +143,7 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
         driver.execute_script("arguments[0].click();", btn)
         print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip() if btn.text else 'Chargement...'}")
 
-        WebDriverWait(driver, 20).until(  # augmenté
+        WebDriverWait(driver, 25).until(  # augmenté
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
         )
         print("[DEBUG] Menu déroulant du calendrier ouvert.")
