@@ -292,9 +292,9 @@ def main():
             def normalize(s): return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFD", s or "").lower())
             team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
 
-            # ➜ IDs priorisés par joueur (override si fournis dans players-json)
-            player_league_id = player.get("league_id")
-            player_schedule_id = player.get("schedule_id")
+            # ➜ IDs priorisés par joueur + alias (league_id|league_uuid|leagueId|league ; schedule_id|scheduleId|schedule)
+            player_league_id = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or player.get("league")
+            player_schedule_id = player.get("schedule_id") or player.get("scheduleId") or player.get("schedule")
 
             if not team_info and not (player_league_id and player_schedule_id):
                 print(f"[WARN] Aucune équipe trouvée pour {team_name} et aucun ID propre au joueur.")
@@ -307,7 +307,8 @@ def main():
                 print(f"[WARN] IDs manquants pour {player_name}. Saut.")
                 continue
 
-            print(f"[CTX] {player_name} → league_id={league_id} schedule_id={schedule_id}")
+            src = "player" if (player_league_id or player_schedule_id) else "team_map"
+            print(f"[CTX] {player_name} → league_id={league_id} schedule_id={schedule_id} (src={src})")
 
             try:
                 base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
