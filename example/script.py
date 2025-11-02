@@ -36,7 +36,7 @@ def get_html_selenium(url: str) -> str:
     print(f"[INFO] Ouverture de {url}")
     driver = setup_driver()
     driver.get(url)
-    time.sleep(4)
+    time.sleep(7)  # ↑ 4 → 7s : laisser le temps aux tables/SPAs de s'injecter
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
@@ -102,11 +102,11 @@ def scroll_to_load_all_matches(driver):
     try:
         last_total = 0
         same_count = 0
-        for i in range(15):
+        for i in range(20):  # ↑ 15 → 20
             driver.execute_script("window.scrollBy(0, window.innerHeight);")
-            time.sleep(1.2)
+            time.sleep(1.6)   # ↑ 1.2 → 1.6
             driver.execute_script("window.scrollBy(0, -150);")
-            time.sleep(0.8)
+            time.sleep(1.2)   # ↑ 0.8 → 1.2
 
             html = driver.page_source
             soup = BeautifulSoup(html, "html.parser")
@@ -133,20 +133,21 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
     driver = setup_driver()
     driver.get(url)
     driver.execute_script("window.scrollTo(0, 0);")
-    time.sleep(1.5)
+    time.sleep(3.0)  # ↑ 1.5 → 3.0 : laisser le calendrier se préparer
 
     try:
-        btn = WebDriverWait(driver, 15).until(
+        btn = WebDriverWait(driver, 25).until(  # ↑ 15 → 25
             EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
         driver.execute_script("arguments[0].scrollIntoView(true);", btn)
         driver.execute_script("arguments[0].click();", btn)
-        print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip()}")
+        print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip() if btn.text else 'Chargement...'}")
 
-        WebDriverWait(driver, 10).until(
+        WebDriverWait(driver, 20).until(  # ↑ 10 → 20
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
         )
         print("[DEBUG] Menu déroulant du calendrier ouvert.")
+        time.sleep(0.8)  # petit délai de grâce
 
         dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
         items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
@@ -158,7 +159,7 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
                 print(f"[DEBUG] → Option '{filtre}' sélectionnée.")
                 break
 
-        time.sleep(1)
+        time.sleep(2.0)  # ↑ 1 → 2.0 : laisser le choix s'appliquer
         try:
             apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
             driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
@@ -167,11 +168,14 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
         except Exception as e:
             print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
 
+        # Laisser la liste de matchs se recharger avant le scroll
+        time.sleep(2.0)  # nouveau délai
         scroll_to_load_all_matches(driver)
 
     except Exception as e:
         print(f"[WARN] Interaction dropdown échouée : {e}")
 
+    time.sleep(1.0)  # petit délai final avant capture
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML après sélection: {len(html)} caractères")
@@ -204,7 +208,7 @@ def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, pe
             arena = arena_el.get_text(strip=True) if arena_el else ""
             print(f"[DEBUG] Match détecté: {date_text} | {teams} | scores={scores} | final={final}")
 
-            if not teams: 
+            if not teams:
                 continue
 
             joined = clean_text("".join(teams))
@@ -232,6 +236,8 @@ def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, pe
 def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
     sensor_id = f"{entity_prefix}_{slug}_{label}"
     base = f"{discovery_prefix}/sensor/{sensor_id}"
+    cfg_topic = f"{base}/config}"
+    # Correction: éviter accolade perdue (si tu l’avais déjà correct, garde l’original)
     cfg_topic = f"{base}/config"
     state_topic = f"{base}/state"
     attr_topic = f"{base}/attributes"
