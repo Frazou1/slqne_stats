@@ -56,7 +56,3 @@ schema:
   mqtt_username: str
   mqtt_password: str
   discovery_prefix: str
-
-build:
-  builder: docker
-  file: Dockerfile
