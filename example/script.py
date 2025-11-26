@@ -22,6 +22,13 @@ def now_local_iso():
 def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
+def normalize(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
 def setup_driver():
     opts = Options()
     opts.add_argument("--headless=new")
@@ -36,7 +43,7 @@ def get_html_selenium(url: str) -> str:
     print(f"[INFO] Ouverture de {url}")
     driver = setup_driver()
     driver.get(url)
-    time.sleep(15)  # délai augmenté pour laisser la page se stabiliser
+    time.sleep(15)
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
@@ -102,11 +109,11 @@ def scroll_to_load_all_matches(driver):
     try:
         last_total = 0
         same_count = 0
-        for i in range(25):  # augmenté
+        for i in range(25):
             driver.execute_script("window.scrollBy(0, window.innerHeight);")
-            time.sleep(1.6)   # augmenté
+            time.sleep(1.6)
             driver.execute_script("window.scrollBy(0, -150);")
-            time.sleep(1.2)   # augmenté
+            time.sleep(1.2)
 
             html = driver.page_source
             soup = BeautifulSoup(html, "html.parser")
@@ -133,17 +140,17 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
     driver = setup_driver()
     driver.get(url)
     driver.execute_script("window.scrollTo(0, 0);")
-    time.sleep(3.0)  # augmenté
+    time.sleep(3.0)
 
     try:
-        btn = WebDriverWait(driver, 25).until(  # augmenté
+        btn = WebDriverWait(driver, 25).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
         )
         driver.execute_script("arguments[0].scrollIntoView(true);", btn)
         driver.execute_script("arguments[0].click();", btn)
         print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip() if btn.text else 'Chargement...'}")
 
-        WebDriverWait(driver, 25).until(  # augmenté
+        WebDriverWait(driver, 25).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
         )
         print("[DEBUG] Menu déroulant du calendrier ouvert.")
@@ -159,7 +166,7 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
                 print(f"[DEBUG] → Option '{filtre}' sélectionnée.")
                 break
 
-        time.sleep(2.0)  # augmenté
+        time.sleep(2.0)
         try:
             apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
             driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
@@ -168,13 +175,13 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
         except Exception as e:
             print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}")
 
-        time.sleep(2.0)  # nouveau délai avant le scroll
+        time.sleep(2.0)
         scroll_to_load_all_matches(driver)
 
     except Exception as e:
         print(f"[WARN] Interaction dropdown échouée : {e}")
 
-    time.sleep(1.0)  # petit délai final
+    time.sleep(1.0)
     html = driver.page_source
     driver.quit()
     print(f"[DEBUG] Taille du HTML après sélection: {len(html)} caractères")
@@ -188,17 +195,8 @@ def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, pe
     url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
     html = get_schedule_html_interactive(url_schedule, filtre=periode)
     soup = BeautifulSoup(html, "html.parser")
-
-    # Nouvelle fonction normalize
-    def normalize(s: str) -> str:
-        if not s:
-            return ""
-        s = unicodedata.normalize("NFKD", s)
-        s = s.encode("ascii", "ignore").decode("ascii")
-        return re.sub(r"[^a-z0-9]", "", s.lower())
     
     normalized_team = normalize(team_name)
-
     all_matches = []
 
     for date_section in soup.select("li[data-date-section]"):
@@ -240,7 +238,7 @@ def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, pe
 def mqtt_publish(client, discovery_prefix, entity_prefix, slug, label, icon, state, attributes):
     sensor_id = f"{entity_prefix}_{slug}_{label}"
     base = f"{discovery_prefix}/sensor/{sensor_id}"
-    cfg_topic = f"{base}/config"      # corrigé
+    cfg_topic = f"{base}/config"
     state_topic = f"{base}/state"
     attr_topic = f"{base}/attributes"
 
@@ -289,7 +287,6 @@ def main():
     client.loop_start()
     print("[INFO] Connecté à MQTT")
 
-    # 🟢 Mode joueur : publier selon player_name au lieu du team_name
     if players:
         for player in players:
             player_name = player.get("player_name", "").strip()
@@ -297,11 +294,8 @@ def main():
             slug = slugify(player_name)
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---")
 
-            # Utiliser la même fonction normalize définie plus haut
             team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
 
-
-            # IDs priorisés par joueur + alias permis
             player_league_id = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or player.get("league")
             player_schedule_id = player.get("schedule_id") or player.get("scheduleId") or player.get("schedule")
 
@@ -346,9 +340,7 @@ def main():
                                  {"match": next_match, "updated": now_local_iso()})
             except Exception as e:
                 print(f"[ERREUR] {player_name}: {e}")
-
     else:
-        # 🟠 Mode normal : par équipe
         for team in teams:
             name = team.get("name")
             league_id = team.get("league_id")
