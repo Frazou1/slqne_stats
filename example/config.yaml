@@ -1,5 +1,5 @@
 name: SLQNE Hockey Stats
-version: "1.7.2"   # ← bump pour recharger le schéma
+version: "1.7.3"   # ← bump pour recharger le schéma
 slug: slqne_hockey_stats
 description: >
   Récupère et publie via MQTT les statistiques de la SLQNE (classements, joueurs, gardiens)
