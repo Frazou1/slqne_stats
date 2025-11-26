@@ -189,11 +189,16 @@ def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, pe
     html = get_schedule_html_interactive(url_schedule, filtre=periode)
     soup = BeautifulSoup(html, "html.parser")
 
-    def clean_text(txt):
-        txt = ''.join(c for c in unicodedata.normalize('NFD', txt) if unicodedata.category(c) != 'Mn')
-        return re.sub(r'[^a-z0-9]', '', txt.lower())
+    # Nouvelle fonction normalize
+    def normalize(s: str) -> str:
+        if not s:
+            return ""
+        s = unicodedata.normalize("NFKD", s)
+        s = s.encode("ascii", "ignore").decode("ascii")
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+    
+    normalized_team = normalize(team_name)
 
-    normalized_team = clean_text(team_name)
     all_matches = []
 
     for date_section in soup.select("li[data-date-section]"):
@@ -210,7 +215,7 @@ def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, pe
             if not teams:
                 continue
 
-            joined = clean_text("".join(teams))
+            joined = normalize("".join(teams))
             involving_team = normalized_team in joined
             if not involving_team:
                 continue
@@ -292,8 +297,9 @@ def main():
             slug = slugify(player_name)
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---")
 
-            def normalize(s): return re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFD", s or "").lower())
+            # Utiliser la même fonction normalize définie plus haut
             team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
+
 
             # IDs priorisés par joueur + alias permis
             player_league_id = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or player.get("league")
