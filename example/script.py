@@ -29,6 +29,20 @@ def normalize(s: str) -> str:
     s = s.encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
+def clean_name(name: str) -> str:
+    """Nettoyage et suppression d'une lettre initiale doublée."""
+    if not name:
+        return ""
+    # Normalisation Unicode
+    s = unicodedata.normalize("NFKD", name)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^A-Za-z0-9\s]", "", s)
+    s = s.strip()
+    # Suppression d'une lettre initiale doublée éventuelle
+    if len(s) > 1 and s[0] == s[1]:
+        s = s[1:]
+    return s
+
 def setup_driver():
     opts = Options()
     opts.add_argument("--headless=new")
@@ -291,7 +305,7 @@ def main():
         for player in players:
             player_name = player.get("player_name", "").strip()
             team_name = player.get("team_name", "").strip()
-            player_name = normalize(player_name)  # normalisation pour éviter dédoublement
+            player_name = clean_name(player_name)  # <-- FIX appliqué ici
             slug = slugify(player_name)
 
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---")
