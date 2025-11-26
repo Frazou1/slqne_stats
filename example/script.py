@@ -88,6 +88,8 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
             if len(tds) >= len(headers):
                 row = dict(zip(headers, tds))
                 row["division"] = division_name
+                if "Nom" in row:
+                    row["Nom"] = clean_name(row.get("Nom", ""))
                 team_name = row.get("Équipe") or row.get("Equipe") or ""
                 if team_name and team_name not in seen_teams:
                     rows.append(row)
@@ -112,7 +114,10 @@ def parse_table_generic(html: str) -> List[Dict]:
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
         if len(tds) >= len(headers):
-            rows.append(dict(zip(headers, tds)))
+            row = dict(zip(headers, tds))
+            if "Nom" in row:
+                row["Nom"] = clean_name(row.get("Nom", ""))
+            rows.append(row)
     print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)")
     return rows
 
