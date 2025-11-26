@@ -291,7 +291,9 @@ def main():
         for player in players:
             player_name = player.get("player_name", "").strip()
             team_name = player.get("team_name", "").strip()
+            player_name = normalize(player_name)  # normalisation pour éviter dédoublement
             slug = slugify(player_name)
+
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---")
 
             team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
