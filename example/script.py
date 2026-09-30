@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import os, re, json, time, argparse, unicodedata
+import os, re, json, time, argparse, unicodedata, urllib.parse
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from bs4 import BeautifulSoup
 import paho.mqtt.client as mqtt
 from zoneinfo import ZoneInfo
@@ -12,9 +12,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 LOCAL_TZ = "America/Toronto"
+DEFAULT_BASE_URL = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
 
 # ===============================================================
-# 🔧 Utils
+# 🔧 Utils & Parsing d'URL
 # ===============================================================
 def now_local_iso():
     return datetime.now(ZoneInfo(LOCAL_TZ)).isoformat()
@@ -33,15 +34,51 @@ def clean_name(name: str) -> str:
     """Nettoyage et suppression d'une lettre initiale doublée."""
     if not name:
         return ""
-    # Normalisation Unicode
     s = unicodedata.normalize("NFKD", name)
     s = s.encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^A-Za-z0-9\s]", "", s)
     s = s.strip()
-    # Suppression d'une lettre initiale doublée éventuelle
     if len(s) > 1 and s[0] == s[1]:
         s = s[1:]
     return s
+
+def parse_spordle_url(spordle_url: Optional[str], default_league_id: Optional[str] = None, default_schedule_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Extrait (league_id, schedule_id, base_url) depuis une URL Spordle / RSEQ.
+    
+    Exemples gérés :
+      - https://scolaire.rseqhockey.com/fr/teams/179927?organizationId=ae5bed83-a302-4ac5-927b-639d2c20a3c9
+      - https://page.spordle.com/lhqca/schedule-stats-standings/211183?organizationId=c43095cf-c7e6-4562-994c-a71a9a0cbf3a
+    """
+    league_id = default_league_id
+    schedule_id = default_schedule_id
+    base_url = DEFAULT_BASE_URL
+
+    if not spordle_url:
+        return league_id, schedule_id, base_url
+
+    parsed = urllib.parse.urlparse(spordle_url.strip())
+    
+    # Reconstitution de l'URL de base selon le domaine de l'URL passée
+    if parsed.scheme and parsed.netloc:
+        path_clean = re.sub(r'/(?:teams|schedule-stats-standings|classement|schedule)/?.*$', '', parsed.path)
+        base_url = f"{parsed.scheme}://{parsed.netloc}{path_clean}".rstrip('/')
+        if "schedule-stats-standings" not in base_url and "teams" not in base_url:
+            base_url += "/schedule-stats-standings"
+
+    # 1. Extraction de organizationId (?organizationId=...)
+    query_params = urllib.parse.parse_qs(parsed.query)
+    if 'organizationId' in query_params:
+        league_id = query_params['organizationId'][0]
+
+    # 2. Extraction du schedule_id (le dernier segment numérique du chemin)
+    path_segments = [seg for seg in parsed.path.split('/') if seg]
+    for seg in reversed(path_segments):
+        if seg.isdigit():
+            schedule_id = seg
+            break
+
+    return league_id, schedule_id, base_url
 
 def setup_driver():
     opts = Options()
@@ -209,8 +246,7 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
 # ===============================================================
 # 🏒 Extraction des matchs et filtrage dernier / prochain
 # ===============================================================
-def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, periode="30 derniers jours"):
-    base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
+def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, base_url: str = DEFAULT_BASE_URL, periode="30 derniers jours"):
     url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
     html = get_schedule_html_interactive(url_schedule, filtre=periode)
     soup = BeautifulSoup(html, "html.parser")
@@ -293,7 +329,7 @@ def main():
     if players:
         print(f"[INFO] {len(players)} joueur(s) suivis :")
         for p in players:
-            print(f"   → {p.get('player_name','?')} ({p.get('team_name','?')})")
+            print(f"    → {p.get('player_name','?')} ({p.get('team_name','?')})")
 
     if not teams:
         print("[ERREUR] Aucune catégorie configurée.")
@@ -310,32 +346,27 @@ def main():
         for player in players:
             player_name = player.get("player_name", "").strip()
             team_name = player.get("team_name", "").strip()
-            player_name = clean_name(player_name)  # <-- FIX appliqué ici
+            player_name = clean_name(player_name)
             slug = slugify(player_name)
 
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---")
 
-            team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
+            team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), {})
 
-            player_league_id = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or player.get("league")
-            player_schedule_id = player.get("schedule_id") or player.get("scheduleId") or player.get("schedule")
+            # Résolution des IDs + URL (soit au niveau joueur, soit hérité de l'équipe)
+            raw_url = player.get("spordle_url") or team_info.get("spordle_url")
+            raw_league = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or team_info.get("league_id")
+            raw_schedule = player.get("schedule_id") or player.get("scheduleId") or team_info.get("schedule_id")
 
-            if not team_info and not (player_league_id and player_schedule_id):
-                print(f"[WARN] Aucune équipe trouvée pour {team_name} et aucun ID propre au joueur.")
-                continue
-
-            league_id = player_league_id or (team_info.get("league_id") if team_info else None)
-            schedule_id = player_schedule_id or (team_info.get("schedule_id") if team_info else None)
+            league_id, schedule_id, base_url = parse_spordle_url(raw_url, raw_league, raw_schedule)
 
             if not league_id or not schedule_id:
-                print(f"[WARN] IDs manquants pour {player_name}. Saut.")
+                print(f"[WARN] IDs ou URL manquants pour {player_name}. Saut.")
                 continue
 
-            src = "player" if (player_league_id or player_schedule_id) else "team_map"
-            print(f"[CTX] {player_name} → league_id={league_id} schedule_id={schedule_id} (src={src})")
+            print(f"[CTX] {player_name} → league_id={league_id} schedule_id={schedule_id} base_url={base_url}")
 
             try:
-                base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
                 html_standings = get_html_selenium(f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}")
                 standings = parse_standings_multi_division(html_standings)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
@@ -346,14 +377,14 @@ def main():
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
                              f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
 
-                matchs_passes = get_games_from_schedule(league_id, schedule_id, team_name, "30 derniers jours")
+                matchs_passes = get_games_from_schedule(league_id, schedule_id, team_name, base_url=base_url, periode="30 derniers jours")
                 if matchs_passes:
                     last = matchs_passes[-1]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
                                  f"{last['score_home']}-{last['score_visitor']}",
                                  {"match": last, "updated": now_local_iso()})
 
-                matchs_futurs = get_games_from_schedule(league_id, schedule_id, team_name, "30 prochains jours")
+                matchs_futurs = get_games_from_schedule(league_id, schedule_id, team_name, base_url=base_url, periode="30 prochains jours")
                 if matchs_futurs:
                     next_match = matchs_futurs[0]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
@@ -364,13 +395,20 @@ def main():
     else:
         for team in teams:
             name = team.get("name")
-            league_id = team.get("league_id")
-            schedule_id = team.get("schedule_id")
+            raw_url = team.get("spordle_url")
+            raw_league = team.get("league_id")
+            raw_schedule = team.get("schedule_id")
+
+            league_id, schedule_id, base_url = parse_spordle_url(raw_url, raw_league, raw_schedule)
+
+            if not league_id or not schedule_id:
+                print(f"[WARN] IDs ou URL manquants pour l'équipe {name}. Saut.")
+                continue
+
             slug = slugify(name)
-            print(f"[INFO] --- Traitement {name} ---")
+            print(f"[INFO] --- Traitement {name} (league_id={league_id}, schedule_id={schedule_id}) ---")
 
             try:
-                base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
                 html_standings = get_html_selenium(f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}")
                 standings = parse_standings_multi_division(html_standings)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
@@ -381,14 +419,14 @@ def main():
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
                              f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
 
-                matchs_passes = get_games_from_schedule(league_id, schedule_id, name, "30 derniers jours")
+                matchs_passes = get_games_from_schedule(league_id, schedule_id, name, base_url=base_url, periode="30 derniers jours")
                 if matchs_passes:
                     last = matchs_passes[-1]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
                                  f"{last['score_home']}-{last['score_visitor']}",
                                  {"match": last, "updated": now_local_iso()})
 
-                matchs_futurs = get_games_from_schedule(league_id, schedule_id, name, "30 prochains jours")
+                matchs_futurs = get_games_from_schedule(league_id, schedule_id, name, base_url=base_url, periode="30 prochains jours")
                 if matchs_futurs:
                     next_match = matchs_futurs[0]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
