@@ -33,8 +33,7 @@ if [[ "$TEAMS_JSON" == "[]" ]]; then
   echo "→ Exemple attendu dans la configuration :"
   echo "teams:"
   echo "  - name: Hayden Hockey"
-  echo "    league_id: bf27e08e-8d52-41be-a097-a6cf79f4466a"
-  echo "    schedule_id: 183363"
+  echo "    spordle_url: https://page.spordle.com/..."
   echo "  - name: Loik Hockey"
   echo "    league_id: 13c38dd1-e464-4835-af5f-75be8561daf6"
   echo "    schedule_id: 183367"
@@ -42,7 +41,7 @@ if [[ "$TEAMS_JSON" == "[]" ]]; then
 fi
 
 # --------------------------------------------------------------------------
-# Lecture du bloc "players" (nouveau)
+# Lecture du bloc "players"
 # --------------------------------------------------------------------------
 PLAYERS_JSON="$(jq -c '
   if (.players // []) | length > 0 then
@@ -64,12 +63,12 @@ fi
 # --------------------------------------------------------------------------
 echo "[INFO] --------------------------------------------------------"
 echo "[INFO] Démarrage de l'add-on SLQNE Hockey Stats"
-echo "[INFO] MQTT                = ${MQTT_HOST:-<non défini>}:$MQTT_PORT"
-echo "[INFO] Discovery prefix    = $DISCOVERY_PREFIX"
-echo "[INFO] Intervalle (sec)    = $UPDATE_INTERVAL"
-echo "[INFO] Entity prefix       = $ENTITY_PREFIX"
+echo "[INFO] MQTT                 = ${MQTT_HOST:-<non défini>}:$MQTT_PORT"
+echo "[INFO] Discovery prefix     = $DISCOVERY_PREFIX"
+echo "[INFO] Intervalle (sec)     = $UPDATE_INTERVAL"
+echo "[INFO] Entity prefix        = $ENTITY_PREFIX"
 echo "[INFO] Équipes configurées :"
-echo "$TEAMS_JSON" | jq -r '.[] | "- \(.name) -> \(.league_id // "?") / \(.schedule_id // "?")"'
+echo "$TEAMS_JSON" | jq -r '.[] | "- \(.name) -> \(.spordle_url // "\(.league_id // "?") / \(.schedule_id // "?")")"'
 echo "[INFO] --------------------------------------------------------"
 
 # --------------------------------------------------------------------------
