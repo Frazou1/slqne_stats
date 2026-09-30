@@ -1,5 +1,5 @@
 name: SLQNE Hockey Stats
-version: "1.7.4"   # ← bump pour recharger le schéma
+version: "1.8.0"
 slug: slqne_hockey_stats
 description: >
   Récupère et publie via MQTT les statistiques de la SLQNE (classements, joueurs, gardiens)
@@ -19,13 +19,12 @@ options:
   entity_prefix: "slqne"
   teams:
     - name: "Hayden Hockey"
-      league_id: "bf27e08e-8d52-41be-a097-a6cf79f4466a"
-      schedule_id: "183363"
+      spordle_url: "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/classement/183363?organizationId=bf27e08e-8d52-41be-a097-a6cf79f4466a"
     - name: "Loik Hockey"
       league_id: "13c38dd1-e464-4835-af5f-75be8561daf6"
       schedule_id: "183367"
 
-  # 🧩 joueurs suivis (override possible par joueur si tu ajoutes league_id/schedule_id ici)
+  # 🧩 joueurs suivis (override possible par joueur via spordle_url, league_id ou schedule_id)
   players:
     - player_name: "Hayden Fraser"
       team_name: "Hayden Hockey"
@@ -43,13 +42,15 @@ schema:
   entity_prefix: str?
   teams:
     - name: str
-      league_id: str
-      schedule_id: str
+      spordle_url: str?    # ← Nouveau : Lien direct Spordle ou RSEQ
+      league_id: str?      # ← Devient optionnel si spordle_url est fourni
+      schedule_id: str?    # ← Devient optionnel si spordle_url est fourni
   players:
     - player_name: str
       team_name: str
-      league_id: str?      # ← autorisé (override par joueur)
-      schedule_id: str?    # ← autorisé (override par joueur)
+      spordle_url: str?    # ← Permet l'override par URL au niveau du joueur
+      league_id: str?      # ← Autorisé (override par joueur)
+      schedule_id: str?    # ← Autorisé (override par joueur)
   update_interval: int(30,86400)
   mqtt_host: str
   mqtt_port: int(1,65535)
