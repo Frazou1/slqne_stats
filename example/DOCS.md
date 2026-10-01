@@ -29,7 +29,7 @@ L’add-on lit les sections *Classements* et *Statistiques* des pages d’équip
    Paramètres → Modules complémentaires → Boutique → menu (⋮) → **Dépôts** → entre l’URL du dépôt.  
    Ou clique sur le bouton ci-dessous :
 
-   [![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FFrazou1%2Fslqne_hockey_stats)
+   [![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2FFrazou1%2Fslqne_stats)
 
 2. **Installe** l’add-on **SLQNE Hockey Stats** depuis la liste des add-ons locaux.
 

@@ -4,7 +4,7 @@ slug: slqne_hockey_stats
 description: >
   Récupère et publie via MQTT les statistiques de la SLQNE (classements, joueurs, gardiens)
   à partir du site Spordle (ligue de hockey mineur Capitale-Nationale).
-url: "https://github.com/Frazou1/slqne_hockey"
+url: "https://github.com/Frazou1/slqne_stats"
 arch:
   - armhf
   - armv7
