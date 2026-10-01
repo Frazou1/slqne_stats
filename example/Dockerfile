@@ -7,32 +7,37 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # --- Timezone ---
 ENV TZ=America/Toronto
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tzdata jq ca-certificates \
+    tzdata jq ca-certificates wget curl gnupg unzip xvfb \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Dépendances système pour Chromium/Selenium ---
+# --- Dépendances système pour Google Chrome & Xvfb ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
-    chromium-driver \
     fonts-liberation \
     libnss3 \
     libxss1 \
-    libgtk2.0-0 \
-    libgbm-dev \
     libasound2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libgconf-2-4 \
+    libxi6 \
+    xauth \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Variables d'environnement utiles à Selenium/Chromium ---
-ENV CHROME_BIN=/usr/bin/chromium \
-    CHROMEDRIVER=/usr/bin/chromedriver \
-    CHROMIUM_FLAGS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080"
+# --- Installation de Google Chrome Stable (Indispensable pour le mode UC) ---
+RUN curl -sS -o - https://google.com | apt-key add - \
+    && echo "deb [arch=amd64] http://google.com stable main" >> /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Configuration de l'affichage virtuel Xvfb ---
+ENV DISPLAY=:99
 
 # --- Dépendances Python ---
 RUN pip install --no-cache-dir \
-    "selenium==4.*" \
-    "webdriver-manager==4.*" \
+    "seleniumbase>=4.20.0" \
     "beautifulsoup4>=4.12,<5" \
     "paho-mqtt==1.6.1" \
     "requests>=2.31,<3"
@@ -42,7 +47,7 @@ WORKDIR /app
 
 # --- Copie des fichiers ---
 COPY run.sh /run.sh
-COPY script.py /script.py
+COPY script.py /app/script.py
 RUN chmod a+x /run.sh
 
 # --- Commande par défaut ---
