@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --------------------------------------------------------------------------
+# 🖥️ Initialisation de l'affichage virtuel pour contourner Cloudflare
+# --------------------------------------------------------------------------
+echo "[INFO] Démarrage du serveur d'affichage virtuel Xvfb..."
+Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+export DISPLAY=:99
+
+# Laisser un court instant à Xvfb pour s'initialiser correctement
+sleep 2
+
+# --------------------------------------------------------------------------
+# Configuration initiale des options
+# --------------------------------------------------------------------------
 OPTIONS_FILE="/data/options.json"
 
 # --------------------------------------------------------------------------
@@ -77,7 +90,8 @@ echo "[INFO] --------------------------------------------------------"
 while true; do
   echo "[INFO] Exécution du script Python SLQNE…"
 
-  python3 /script.py \
+  # Note : Modification du chemin vers /app/script.py pour correspondre au Dockerfile
+  python3 /app/script.py \
     --teams-json "$TEAMS_JSON" \
     --players-json "$PLAYERS_JSON" \
     --entity_prefix "$ENTITY_PREFIX" \
