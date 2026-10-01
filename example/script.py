@@ -44,11 +44,12 @@ def clean_name(name: str) -> str:
 
 def parse_spordle_url(spordle_url: Optional[str], default_league_id: Optional[str] = None, default_schedule_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str], str]:
     """
-    Extrait (league_id, schedule_id, base_url) depuis une URL Spordle / RSEQ.
+    Extrait (league_id, schedule_id, base_url) depuis l'URL Spordle / RSEQ.
     
     Exemples gérés :
+      - https://page.spordle.com/lhqca/schedule-stats-standings/c43095cf-c7e6-4562-994c-a71a9a0cbf3a
+      - https://page.spordle.com/lhqca/teams/211183?tab=schedule
       - https://scolaire.rseqhockey.com/fr/teams/179927?organizationId=ae5bed83-a302-4ac5-927b-639d2c20a3c9
-      - https://page.spordle.com/lhqca/schedule-stats-standings/211183?organizationId=c43095cf-c7e6-4562-994c-a71a9a0cbf3a
     """
     league_id = default_league_id
     schedule_id = default_schedule_id
@@ -59,19 +60,25 @@ def parse_spordle_url(spordle_url: Optional[str], default_league_id: Optional[st
 
     parsed = urllib.parse.urlparse(spordle_url.strip())
     
-    # Reconstitution de l'URL de base selon le domaine de l'URL passée
+    # 1. Reconstitution de l'URL de base (ex: https://page.spordle.com/lhqca/schedule-stats-standings)
     if parsed.scheme and parsed.netloc:
-        path_clean = re.sub(r'/(?:teams|schedule-stats-standings|classement|schedule)/?.*$', '', parsed.path)
-        base_url = f"{parsed.scheme}://{parsed.netloc}{path_clean}".rstrip('/')
-        if "schedule-stats-standings" not in base_url and "teams" not in base_url:
-            base_url += "/schedule-stats-standings"
+        path_parts = [p for p in parsed.path.split('/') if p]
+        if path_parts:
+            league_slug = path_parts[0] if path_parts[0] not in ['fr', 'en'] else (path_parts[1] if len(path_parts) > 1 else path_parts[0])
+            base_url = f"{parsed.scheme}://{parsed.netloc}/{league_slug}/schedule-stats-standings"
+        else:
+            base_url = f"{parsed.scheme}://{parsed.netloc}/schedule-stats-standings"
 
-    # 1. Extraction de organizationId (?organizationId=...)
+    # 2. Extraction du league_id (UUID d'organisation)
     query_params = urllib.parse.parse_qs(parsed.query)
     if 'organizationId' in query_params:
         league_id = query_params['organizationId'][0]
+    else:
+        uuid_match = re.search(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', parsed.path, re.IGNORECASE)
+        if uuid_match:
+            league_id = uuid_match.group(0)
 
-    # 2. Extraction du schedule_id (le dernier segment numérique du chemin)
+    # 3. Extraction du schedule_id (chiffres d'équipe ou de calendrier)
     path_segments = [seg for seg in parsed.path.split('/') if seg]
     for seg in reversed(path_segments):
         if seg.isdigit():
