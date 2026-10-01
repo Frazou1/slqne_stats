@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Dépendances système pour Google Chrome & Xvfb ---
+# --- Dépendances système pour Google Chrome & Xvfb (Nettoyées pour Debian récent) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     libnss3 \
@@ -20,7 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     libgbm1 \
     libgtk-3-0 \
-    libgconf-2-4 \
     libxi6 \
     xauth \
     && rm -rf /var/lib/apt/lists/*
