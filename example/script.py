@@ -42,50 +42,118 @@ def clean_name(name: str) -> str:
         s = s[1:]
     return s
 
-def parse_spordle_url(spordle_url: Optional[str], default_league_id: Optional[str] = None, default_schedule_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str], str]:
+UUID_RE = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', re.IGNORECASE)
+
+def parse_spordle_url(spordle_url: Optional[str], default_league_id: Optional[str] = None, default_schedule_id: Optional[str] = None) -> Dict:
     """
-    Extrait (league_id, schedule_id, base_url) depuis l'URL Spordle / RSEQ.
-    
+    Analyse une URL Spordle / RSEQ et retourne un dict :
+      site        : racine du site en français (ex: https://page.spordle.com/fr/lhqca)
+      base_url    : site + /schedule-stats-standings
+      league_id   : UUID de la catégorie (organizationId / categoryId)
+      schedule_id : id numérique de l'horaire (scheduleId)
+      team_id     : id numérique de l'équipe si l'URL est une page d'équipe (/teams/<id>)
+
     Exemples gérés :
-      - https://page.spordle.com/lhqca/schedule-stats-standings/c43095cf-c7e6-4562-994c-a71a9a0cbf3a
+      - https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/classement/183363?organizationId=bf27e08e-...
+      - https://page.spordle.com/lhqca/schedule-stats-standings/c43095cf-...?scheduleId=198221
       - https://page.spordle.com/lhqca/teams/211183?tab=schedule
-      - https://scolaire.rseqhockey.com/fr/teams/179927?organizationId=ae5bed83-a302-4ac5-927b-639d2c20a3c9
+      - https://scolaire.rseqhockey.com/fr/teams/179927
     """
-    league_id = default_league_id
-    schedule_id = default_schedule_id
-    base_url = DEFAULT_BASE_URL
+    ctx = {"site": None, "base_url": DEFAULT_BASE_URL, "league_id": default_league_id,
+           "schedule_id": default_schedule_id, "team_id": None}
 
     if not spordle_url:
-        return league_id, schedule_id, base_url
+        return ctx
 
     parsed = urllib.parse.urlparse(spordle_url.strip())
-    
-    # 1. Reconstitution de l'URL de base (ex: https://page.spordle.com/lhqca/schedule-stats-standings)
-    if parsed.scheme and parsed.netloc:
-        path_parts = [p for p in parsed.path.split('/') if p]
-        if path_parts:
-            league_slug = path_parts[0] if path_parts[0] not in ['fr', 'en'] else (path_parts[1] if len(path_parts) > 1 else path_parts[0])
-            base_url = f"{parsed.scheme}://{parsed.netloc}/{league_slug}/schedule-stats-standings"
-        else:
-            base_url = f"{parsed.scheme}://{parsed.netloc}/schedule-stats-standings"
+    if not (parsed.scheme and parsed.netloc):
+        return ctx
 
-    # 2. Extraction du league_id (UUID d'organisation)
+    # 1. Racine du site, toujours en français : les en-têtes de tableaux ("Équipe", "Nom"...) en dépendent.
+    #    page.spordle.com : 1er segment = ligue (ex: lhqca). Domaine propre (ex: scolaire.rseqhockey.com) : pas de segment ligue.
+    path_parts = [p for p in parsed.path.split('/') if p and p not in ('fr', 'en')]
+    site = f"{parsed.scheme}://{parsed.netloc}/fr"
+    if parsed.netloc.endswith("page.spordle.com") and path_parts:
+        site += f"/{path_parts.pop(0)}"
+    ctx["site"] = site
+    ctx["base_url"] = f"{site}/schedule-stats-standings"
+
+    # 2. Page d'équipe : l'id numérique est celui de l'équipe, pas de l'horaire (résolu plus tard via la page).
+    if len(path_parts) >= 2 and path_parts[0] == "teams" and path_parts[1].isdigit():
+        ctx["team_id"] = path_parts[1]
+        return ctx
+
+    # 3. Catégorie : organizationId en paramètre, sinon UUID dans le chemin
     query_params = urllib.parse.parse_qs(parsed.query)
     if 'organizationId' in query_params:
-        league_id = query_params['organizationId'][0]
+        ctx["league_id"] = query_params['organizationId'][0]
     else:
-        uuid_match = re.search(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}', parsed.path, re.IGNORECASE)
+        uuid_match = UUID_RE.search(parsed.path)
         if uuid_match:
-            league_id = uuid_match.group(0)
+            ctx["league_id"] = uuid_match.group(0)
 
-    # 3. Extraction du schedule_id (chiffres d'équipe ou de calendrier)
-    path_segments = [seg for seg in parsed.path.split('/') if seg]
-    for seg in reversed(path_segments):
-        if seg.isdigit():
-            schedule_id = seg
-            break
+    # 4. Horaire : scheduleId en paramètre, sinon dernier segment numérique du chemin
+    if 'scheduleId' in query_params:
+        ctx["schedule_id"] = query_params['scheduleId'][0]
+    else:
+        for seg in reversed(path_parts):
+            if seg.isdigit():
+                ctx["schedule_id"] = seg
+                break
 
-    return league_id, schedule_id, base_url
+    return ctx
+
+def resolve_team_page(ctx: Dict) -> Dict:
+    """
+    Pour une URL de page d'équipe : lit la catégorie et le nom réel de l'équipe dans la page,
+    puis trouve l'horaire (scheduleId) de la saison régulière si aucun n'est fourni.
+    """
+    driver = setup_driver()
+    try:
+        url = f"{ctx['site']}/teams/{ctx['team_id']}"
+        print(f"[INFO] Lecture de la page d'équipe {url}")
+        driver.get(url)
+        WebDriverWait(driver, 40).until(lambda d: d.execute_script(
+            "return !!document.getElementById('__NEXT_DATA__')"))
+        team = driver.execute_script(
+            "return JSON.parse(document.getElementById('__NEXT_DATA__').textContent).props.pageProps.team || null")
+        if not team:
+            print("[WARN] Données d'équipe introuvables dans la page.")
+            return ctx
+
+        ctx["league_id"] = ctx.get("league_id") or team.get("categoryId")
+        ctx["site_team_name"] = team.get("shortName") or team.get("name")
+        print(f"[DEBUG] Équipe '{ctx['site_team_name']}' → catégorie {ctx['league_id']}")
+
+        if not ctx.get("schedule_id") and ctx.get("league_id"):
+            ctx["schedule_id"] = find_schedule_id(driver, f"{ctx['base_url']}/{ctx['league_id']}?tab=playerstats")
+    except Exception as e:
+        print(f"[WARN] Résolution de la page d'équipe échouée : {e}")
+    finally:
+        driver.quit()
+    return ctx
+
+def find_schedule_id(driver, url: str) -> Optional[str]:
+    """Ouvre la liste 'Sélectionner un horaire' et choisit la saison régulière (sinon le premier horaire)."""
+    driver.get(url)
+    combo = WebDriverWait(driver, 40).until(EC.element_to_be_clickable(
+        (By.CSS_SELECTOR, "input[aria-label='Sélectionner un horaire']")))
+    combo.click()
+    options = WebDriverWait(driver, 15).until(
+        lambda d: d.find_elements(By.CSS_SELECTOR, "[role='option']"))
+    choice = next((o for o in options if "régulière" in o.text.lower()), options[0])
+    print(f"[DEBUG] Horaire choisi : {choice.text.strip().splitlines()[0] if choice.text.strip() else '?'}")
+    choice.click()
+    WebDriverWait(driver, 15).until(lambda d: "scheduleId=" in d.current_url)
+    schedule_id = urllib.parse.parse_qs(urllib.parse.urlparse(driver.current_url).query)["scheduleId"][0]
+    print(f"[DEBUG] scheduleId = {schedule_id}")
+    return schedule_id
+
+def resolve_context(raw_url: Optional[str], raw_league: Optional[str], raw_schedule: Optional[str]) -> Dict:
+    ctx = parse_spordle_url(raw_url, raw_league, raw_schedule)
+    if ctx.get("team_id"):
+        ctx = resolve_team_page(ctx)
+    return ctx
 
 def setup_driver():
     opts = Options()
@@ -134,7 +202,7 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
                 row["division"] = division_name
                 if "Nom" in row:
                     row["Nom"] = clean_name(row.get("Nom", ""))
-                team_name = row.get("Équipe") or row.get("Equipe") or ""
+                team_name = next((v for k, v in row.items() if normalize(k) == "equipe"), "")
                 if team_name and team_name not in seen_teams:
                     rows.append(row)
                     seen_teams.add(team_name)
@@ -365,12 +433,15 @@ def main():
             raw_league = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or team_info.get("league_id")
             raw_schedule = player.get("schedule_id") or player.get("scheduleId") or team_info.get("schedule_id")
 
-            league_id, schedule_id, base_url = parse_spordle_url(raw_url, raw_league, raw_schedule)
+            ctx = resolve_context(raw_url, raw_league, raw_schedule)
+            league_id, schedule_id, base_url = ctx["league_id"], ctx["schedule_id"], ctx["base_url"]
 
             if not league_id or not schedule_id:
                 print(f"[WARN] IDs ou URL manquants pour {player_name}. Saut.")
                 continue
 
+            # Nom réel de l'équipe sur le site (page d'équipe) pour reconnaître ses matchs
+            team_name = ctx.get("site_team_name") or team_name
             print(f"[CTX] {player_name} → league_id={league_id} schedule_id={schedule_id} base_url={base_url}")
 
             try:
@@ -406,13 +477,16 @@ def main():
             raw_league = team.get("league_id")
             raw_schedule = team.get("schedule_id")
 
-            league_id, schedule_id, base_url = parse_spordle_url(raw_url, raw_league, raw_schedule)
+            ctx = resolve_context(raw_url, raw_league, raw_schedule)
+            league_id, schedule_id, base_url = ctx["league_id"], ctx["schedule_id"], ctx["base_url"]
 
             if not league_id or not schedule_id:
                 print(f"[WARN] IDs ou URL manquants pour l'équipe {name}. Saut.")
                 continue
 
             slug = slugify(name)
+            # Nom réel de l'équipe sur le site (page d'équipe) pour reconnaître ses matchs ; le slug garde le nom configuré
+            name = ctx.get("site_team_name") or name
             print(f"[INFO] --- Traitement {name} (league_id={league_id}, schedule_id={schedule_id}) ---")
 
             try:
