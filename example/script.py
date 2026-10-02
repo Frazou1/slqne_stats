@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 import paho.mqtt.client as mqtt
 from zoneinfo import ZoneInfo
 
-# REMPLACEMENT DES IMPORTS SELENIUM STANDARDS PAR SELENIUMBASE
+# IMPORTS SELENIUMBASE
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -92,7 +92,6 @@ def resolve_team_page(ctx: Dict) -> Dict:
         url = f"{ctx['site']}/teams/{ctx['team_id']}"
         print(f"[INFO] Lecture de la page d'équipe {url}")
         
-        # Utilisation de la méthode uc_open de SeleniumBase au lieu de get() pour une connexion furtive initiale
         driver.uc_open(url)
         
         WebDriverWait(driver, 40).until(lambda d: d.execute_script(
@@ -137,19 +136,26 @@ def resolve_context(raw_url: Optional[str], raw_league: Optional[str], raw_sched
         ctx = resolve_team_page(ctx)
     return ctx
 
-# 🔧 INITIALISATION DU DRIVER MODIFIÉE POUR SELENIUMBASE UC MODE
+# 🔧 INITIALISATION DU DRIVER OPTIMISÉE POUR DOCKER ET SELENIUMBASE UC MODE
 def setup_driver():
     """Initialise un driver Chromium furtif indétectable par Cloudflare."""
-    # uc=True active le mode indétectable
-    # headless2=True applique le nouveau mode headless de Chrome (indispensable pour contourner Cloudflare sans interface)
-    return Driver(uc=True, headless2=True, no_sandbox=True, disable_gpu=True)
+    return Driver(
+        uc=True,
+        headless2=True,
+        no_sandbox=True,
+        disable_gpu=True,
+        extra_settings=[
+            "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--disable-blink-features=AutomationControlled"
+        ]
+    )
 
 def get_html_selenium(url: str) -> str:
     print(f"[INFO] Ouverture de {url}")
     driver = setup_driver()
     try:
         driver.uc_open(url)
-        # Un délai de sécurité plus court peut suffire avec UC mode, ajustez si nécessaire
         time.sleep(10) 
         html = driver.page_source
         print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères")
@@ -168,4 +174,4 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
         print("[WARN] Aucune table trouvée dans le HTML.")
         return []
     print(f"[DEBUG] {len(tables)} tables trouvées")
-    # ... Reste de votre logique de parsing
+    return all_rows
