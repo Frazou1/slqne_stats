@@ -46,17 +46,15 @@ def clean_name(name: str) -> str:
 
 def setup_driver():
     """Initialise un driver Chromium furtif indétectable et ultra-rapide."""
+    # En passe les arguments Chromium sous forme de chaîne séparée par des virgules
+    chrome_args = "--disable-dev-shm-usage,--no-first-run,--disable-blink-features=AutomationControlled,--blink-settings=imagesEnabled=false"
+    
     return Driver(
         uc=True,
         headless2=True,
         no_sandbox=True,
         disable_gpu=True,
-        extra_settings=[
-            "--disable-dev-shm-usage",
-            "--no-first-run",
-            "--disable-blink-features=AutomationControlled",
-            "--blink-settings=imagesEnabled=false"  # Désactive le chargement des images pour accélérer le scraping
-        ]
+        chromium_arg=chrome_args
     )
 
 def get_html_selenium(url: str) -> str:
