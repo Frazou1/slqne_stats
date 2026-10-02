@@ -8,7 +8,6 @@ echo "[INFO] Démarrage du serveur d'affichage virtuel Xvfb..."
 Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
 export DISPLAY=:99
 
-# Laisser un court instant à Xvfb pour s'initialiser correctement
 sleep 2
 
 # --------------------------------------------------------------------------
@@ -90,7 +89,6 @@ echo "[INFO] --------------------------------------------------------"
 while true; do
   echo "[INFO] Exécution du script Python SLQNE…"
 
-  # Note : Modification du chemin vers /app/script.py pour correspondre au Dockerfile
   python3 /app/script.py \
     --teams-json "$TEAMS_JSON" \
     --players-json "$PLAYERS_JSON" \
