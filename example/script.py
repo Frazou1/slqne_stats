@@ -44,24 +44,26 @@ def clean_name(name: str) -> str:
 
 def build_team_tab_url(spordle_team_url: str, tab: str) -> str:
     """
-    Construit l'URL avec l'onglet désiré (?tab=schedule, ?tab=standings, etc.)
-    Exemple : https://page.spordle.com/fr/lhqca/teams/211183 -> .../211183?tab=standings
+    Nettoie l'URL pour retirer les query params parasites (ex: organizationId)
+    et applique uniquement ?tab=<tab>.
+    Exemple:
+    https://page.spordle.com/lhqca/teams/211183?organizationId=c43095cf...
+    -> https://page.spordle.com/lhqca/teams/211183?tab=standings
     """
     if not spordle_team_url or not spordle_team_url.startswith("http"):
         return spordle_team_url
 
     parsed = urllib.parse.urlparse(spordle_team_url)
-    query_params = urllib.parse.parse_qs(parsed.query)
-    query_params["tab"] = [tab]
+    # Reconstruit l'URL propre sans aucun query param original, en ajoutant uniquement tab
+    new_query = urllib.parse.urlencode({"tab": tab})
     
-    new_query = urllib.parse.urlencode(query_params, doseq=True)
     return urllib.parse.urlunparse((
         parsed.scheme,
         parsed.netloc,
         parsed.path,
-        parsed.params,
+        "",
         new_query,
-        parsed.fragment
+        ""
     ))
 
 def setup_driver():
@@ -84,7 +86,7 @@ def get_html_selenium(url: str) -> str:
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
-        time.sleep(2)  # Pause pour laisser le JS charger les tableaux Spordle/RSEQ
+        time.sleep(2)  # Attente du rendu dynamique Spordle/RSEQ
         html = driver.page_source
         print(f"[DEBUG] Taille du HTML: {len(html)} caractères", flush=True)
         return html
