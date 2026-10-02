@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, json, time, argparse, unicodedata
+import os, re, json, time, argparse, unicodedata, urllib.parse
 from datetime import datetime
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
@@ -44,11 +44,28 @@ def clean_name(name: str) -> str:
         s = s[1:]
     return s
 
+def build_spordle_url(base_url_ref: str, league_id: str, schedule_id: Optional[str], tab: str) -> str:
+    """Construit l'URL dynamique selon le domaine d'origine (RSEQ ou Spordle)."""
+    if not base_url_ref or not base_url_ref.startswith("http"):
+        base_url_ref = "https://page.spordle.com"
+
+    parsed = urllib.parse.urlparse(base_url_ref)
+    base_site = f"{parsed.scheme}://{parsed.netloc}"
+
+    if "rseq" in parsed.netloc:
+        url = f"{base_site}/fr/schedule-stats-standings/{league_id}?tab={tab}"
+    else:
+        url = f"{base_site}/fr/schedule-stats-standings/{league_id}?tab={tab}"
+
+    if schedule_id:
+        url += f"&scheduleId={schedule_id}"
+
+    return url
+
 def setup_driver():
     """Initialise un driver Chromium furtif indétectable et ultra-rapide."""
-    # En passe les arguments Chromium sous forme de chaîne séparée par des virgules
     chrome_args = "--disable-dev-shm-usage,--no-first-run,--disable-blink-features=AutomationControlled,--blink-settings=imagesEnabled=false"
-    
+
     return Driver(
         uc=True,
         headless2=True,
@@ -62,8 +79,7 @@ def get_html_selenium(url: str) -> str:
     driver = setup_driver()
     try:
         driver.uc_open(url)
-        # Attente dynamique de l'élément body au lieu d'un sleep fixe
-        WebDriverWait(driver, 20).until(
+        WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
         html = driver.page_source
@@ -217,13 +233,12 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
 # ===============================================================
 # 🏒 Extraction des matchs et filtrage dernier / prochain
 # ===============================================================
-def get_games_from_schedule(league_id: str, schedule_id: str, team_name: str, periode="30 derniers jours"):
-    base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
-    url_schedule = f"{base_url}/{league_id}?tab=schedule&scheduleId={schedule_id}"
+def get_games_from_schedule(base_url_ref: str, league_id: str, schedule_id: str, team_name: str, periode="30 derniers jours"):
+    url_schedule = build_spordle_url(base_url_ref, league_id, schedule_id, "schedule")
     html = get_schedule_html_interactive(url_schedule, filtre=periode)
     if not html:
         return []
-        
+
     soup = BeautifulSoup(html, "html.parser")
     normalized_team = normalize(team_name)
     all_matches = []
@@ -325,7 +340,7 @@ def main():
 
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---", flush=True)
 
-            team_info = next((t for t in teams if normalize(t.get("name")) == normalize(team_name)), None)
+            team_info = next((t for t in teams if normalize(t.get("name")) in normalize(team_name) or normalize(team_name) in normalize(t.get("name"))), None)
 
             player_league_id = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or player.get("league")
             player_schedule_id = player.get("schedule_id") or player.get("scheduleId") or player.get("schedule")
@@ -336,6 +351,7 @@ def main():
 
             league_id = player_league_id or (team_info.get("league_id") if team_info else None)
             schedule_id = player_schedule_id or (team_info.get("schedule_id") if team_info else None)
+            spordle_url_ref = team_info.get("spordle_url", "https://page.spordle.com") if team_info else "https://page.spordle.com"
 
             if not league_id or not schedule_id:
                 print(f"[WARN] IDs manquants pour {player_name}. Saut.", flush=True)
@@ -345,25 +361,30 @@ def main():
             print(f"[CTX] {player_name} → league_id={league_id} schedule_id={schedule_id} (src={src})", flush=True)
 
             try:
-                base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
-                html_standings = get_html_selenium(f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}")
+                # 1. Classement
+                url_standings = build_spordle_url(spordle_url_ref, league_id, schedule_id, "standings")
+                html_standings = get_html_selenium(url_standings)
                 standings = parse_standings_multi_division(html_standings)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
                              f"{len(standings)} équipes", {"standings": standings, "updated": now_local_iso()})
 
-                html_players = get_html_selenium(f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}")
+                # 2. Stats Joueurs
+                url_players = build_spordle_url(spordle_url_ref, league_id, schedule_id, "playerstats")
+                html_players = get_html_selenium(url_players)
                 players_stats = parse_table_generic(html_players)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
                              f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
 
-                matchs_passes = get_games_from_schedule(league_id, schedule_id, team_name, "30 derniers jours")
+                # 3. Dernier Match
+                matchs_passes = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, team_name, "30 derniers jours")
                 if matchs_passes:
                     last = matchs_passes[-1]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
                                  f"{last['score_home']}-{last['score_visitor']}",
                                  {"match": last, "updated": now_local_iso()})
 
-                matchs_futurs = get_games_from_schedule(league_id, schedule_id, team_name, "30 prochains jours")
+                # 4. Prochain Match
+                matchs_futurs = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, team_name, "30 prochains jours")
                 if matchs_futurs:
                     next_match = matchs_futurs[0]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
@@ -376,29 +397,35 @@ def main():
             name = team.get("name")
             league_id = team.get("league_id")
             schedule_id = team.get("schedule_id")
+            spordle_url_ref = team.get("spordle_url", "https://page.spordle.com")
             slug = slugify(name)
             print(f"[INFO] --- Traitement {name} ---", flush=True)
 
             try:
-                base_url = "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/schedule-stats-standings"
-                html_standings = get_html_selenium(f"{base_url}/{league_id}?tab=standings&scheduleId={schedule_id}")
+                # 1. Classement
+                url_standings = build_spordle_url(spordle_url_ref, league_id, schedule_id, "standings")
+                html_standings = get_html_selenium(url_standings)
                 standings = parse_standings_multi_division(html_standings)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
                              f"{len(standings)} équipes", {"standings": standings, "updated": now_local_iso()})
 
-                html_players = get_html_selenium(f"{base_url}/{league_id}?tab=playerstats&scheduleId={schedule_id}")
+                # 2. Stats Joueurs
+                url_players = build_spordle_url(spordle_url_ref, league_id, schedule_id, "playerstats")
+                html_players = get_html_selenium(url_players)
                 players_stats = parse_table_generic(html_players)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
                              f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
 
-                matchs_passes = get_games_from_schedule(league_id, schedule_id, name, "30 derniers jours")
+                # 3. Dernier Match
+                matchs_passes = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, name, "30 derniers jours")
                 if matchs_passes:
                     last = matchs_passes[-1]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
                                  f"{last['score_home']}-{last['score_visitor']}",
                                  {"match": last, "updated": now_local_iso()})
 
-                matchs_futurs = get_games_from_schedule(league_id, schedule_id, name, "30 prochains jours")
+                # 4. Prochain Match
+                matchs_futurs = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, name, "30 prochains jours")
                 if matchs_futurs:
                     next_match = matchs_futurs[0]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
