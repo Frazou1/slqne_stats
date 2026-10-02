@@ -34,33 +34,35 @@ def clean_name(name: str) -> str:
     """Nettoyage et suppression d'une lettre initiale doublée."""
     if not name:
         return ""
-    # Normalisation Unicode
     s = unicodedata.normalize("NFKD", name)
     s = s.encode("ascii", "ignore").decode("ascii")
     s = re.sub(r"[^A-Za-z0-9\s]", "", s)
     s = s.strip()
-    # Suppression d'une lettre initiale doublée éventuelle
     if len(s) > 1 and s[0] == s[1]:
         s = s[1:]
     return s
 
-def build_spordle_url(base_url_ref: str, league_id: str, schedule_id: Optional[str], tab: str) -> str:
-    """Construit l'URL dynamique selon le domaine d'origine (RSEQ ou Spordle)."""
-    if not base_url_ref or not base_url_ref.startswith("http"):
-        base_url_ref = "https://page.spordle.com"
+def build_team_tab_url(spordle_team_url: str, tab: str) -> str:
+    """
+    Construit l'URL avec l'onglet désiré (?tab=schedule, ?tab=standings, etc.)
+    Exemple : https://page.spordle.com/fr/lhqca/teams/211183 -> .../211183?tab=standings
+    """
+    if not spordle_team_url or not spordle_team_url.startswith("http"):
+        return spordle_team_url
 
-    parsed = urllib.parse.urlparse(base_url_ref)
-    base_site = f"{parsed.scheme}://{parsed.netloc}"
-
-    if "rseq" in parsed.netloc:
-        url = f"{base_site}/fr/schedule-stats-standings/{league_id}?tab={tab}"
-    else:
-        url = f"{base_site}/fr/schedule-stats-standings/{league_id}?tab={tab}"
-
-    if schedule_id:
-        url += f"&scheduleId={schedule_id}"
-
-    return url
+    parsed = urllib.parse.urlparse(spordle_team_url)
+    query_params = urllib.parse.parse_qs(parsed.query)
+    query_params["tab"] = [tab]
+    
+    new_query = urllib.parse.urlencode(query_params, doseq=True)
+    return urllib.parse.urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        parsed.params,
+        new_query,
+        parsed.fragment
+    ))
 
 def setup_driver():
     """Initialise un driver Chromium furtif indétectable et ultra-rapide."""
@@ -79,11 +81,12 @@ def get_html_selenium(url: str) -> str:
     driver = setup_driver()
     try:
         driver.uc_open(url)
-        WebDriverWait(driver, 30).until(
+        WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
+        time.sleep(2)  # Pause pour laisser le JS charger les tableaux Spordle/RSEQ
         html = driver.page_source
-        print(f"[DEBUG] Taille du HTML ({url.split('?tab=')[-1]}): {len(html)} caractères", flush=True)
+        print(f"[DEBUG] Taille du HTML: {len(html)} caractères", flush=True)
         return html
     except Exception as e:
         print(f"[ERREUR] Échec du chargement de {url}: {e}", flush=True)
@@ -92,7 +95,7 @@ def get_html_selenium(url: str) -> str:
         driver.quit()
 
 # ===============================================================
-# 🧠 Parsing standings et stats joueurs
+# 🧠 Parsing standings et stats
 # ===============================================================
 def parse_standings_multi_division(html: str) -> List[Dict]:
     if not html:
@@ -103,7 +106,6 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
     if not tables:
         print("[WARN] Aucune table trouvée dans le HTML.", flush=True)
         return []
-    print(f"[DEBUG] {len(tables)} tables trouvées dans la page standings", flush=True)
 
     for i, table in enumerate(tables, start=1):
         division_name = "Division inconnue"
@@ -124,11 +126,8 @@ def parse_standings_multi_division(html: str) -> List[Dict]:
                     seen_teams.add(team_name)
 
         if len(rows) > 15:
-            print(f"[DEBUG] Table {i} ignorée ({len(rows)} lignes, probable tableau global).", flush=True)
             continue
-        print(f"[DEBUG] {len(rows)} lignes extraites pour {division_name}", flush=True)
         all_rows.extend(rows)
-    print(f"[DEBUG] Total {len(all_rows)} lignes multi-division uniques extraites", flush=True)
     return all_rows
 
 def parse_table_generic(html: str) -> List[Dict]:
@@ -145,32 +144,29 @@ def parse_table_generic(html: str) -> List[Dict]:
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
         if len(tds) >= len(headers):
             rows.append(dict(zip(headers, tds)))
-    print(f"[DEBUG] {len(rows)} lignes extraites ({headers[:5]}...)", flush=True)
     return rows
 
 # ===============================================================
-# 🔄 Scroll global pour charger tous les matchs Spordle
+# 🔄 Scroll global pour charger tous les matchs
 # ===============================================================
 def scroll_to_load_all_matches(driver):
     try:
         last_total = 0
         same_count = 0
-        for i in range(25):
+        for i in range(15):
             driver.execute_script("window.scrollBy(0, window.innerHeight);")
-            time.sleep(1.0)
-            driver.execute_script("window.scrollBy(0, -150);")
             time.sleep(0.8)
+            driver.execute_script("window.scrollBy(0, -150);")
+            time.sleep(0.5)
 
             html = driver.page_source
             soup = BeautifulSoup(html, "html.parser")
             matches = soup.select("li[data-event='true']")
             total = len(matches)
-            print(f"[DEBUG] Scroll global {i+1}: {total} matchs visibles...", flush=True)
 
             if total == last_total:
                 same_count += 1
-                if same_count >= 3:
-                    print("[DEBUG] Fin du scroll : plus de nouveaux matchs détectés.", flush=True)
+                if same_count >= 2:
                     break
             else:
                 same_count = 0
@@ -188,53 +184,47 @@ def get_schedule_html_interactive(url: str, filtre="30 derniers jours") -> str:
         driver.uc_open(url)
         driver.execute_script("window.scrollTo(0, 0);")
 
-        btn = WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
-        )
-        driver.execute_script("arguments[0].scrollIntoView(true);", btn)
-        driver.execute_script("arguments[0].click();", btn)
-        print(f"[DEBUG] Bouton calendrier cliqué par JS: {btn.text.strip() if btn.text else 'Chargement...'}", flush=True)
-
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
-        )
-        print("[DEBUG] Menu déroulant du calendrier ouvert.", flush=True)
-
-        dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
-        items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
-        for item in items:
-            txt = item.text.strip().lower()
-            if filtre in txt:
-                driver.execute_script("arguments[0].scrollIntoView(true);", item)
-                driver.execute_script("arguments[0].click();", item)
-                print(f"[DEBUG] → Option '{filtre}' sélectionnée.", flush=True)
-                break
-
-        time.sleep(1.0)
         try:
+            btn = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "button.btn-outline-primary"))
+            )
+            driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+            driver.execute_script("arguments[0].click();", btn)
+
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.dropdown-menu.show"))
+            )
+
+            dropdown = driver.find_element(By.CSS_SELECTOR, "div.dropdown-menu.show")
+            items = dropdown.find_elements(By.CSS_SELECTOR, "li.list-group-item, li.list-group-item-action")
+            for item in items:
+                txt = item.text.strip().lower()
+                if filtre in txt:
+                    driver.execute_script("arguments[0].scrollIntoView(true);", item)
+                    driver.execute_script("arguments[0].click();", item)
+                    break
+
+            time.sleep(1.0)
             apply_button = dropdown.find_element(By.CSS_SELECTOR, "footer button.btn.btn-primary")
             driver.execute_script("arguments[0].scrollIntoView(true);", apply_button)
             driver.execute_script("arguments[0].click();", apply_button)
-            print("[DEBUG] → Bouton 'Appliquer' cliqué.", flush=True)
         except Exception as e:
-            print(f"[WARN] Impossible de cliquer sur 'Appliquer': {e}", flush=True)
+            print(f"[DEBUG] Étape filtre non appliquée ou inutilisée : {e}", flush=True)
 
         time.sleep(1.5)
         scroll_to_load_all_matches(driver)
-        html = driver.page_source
-        print(f"[DEBUG] Taille du HTML après sélection: {len(html)} caractères", flush=True)
-        return html
+        return driver.page_source
     except Exception as e:
-        print(f"[WARN] Interaction dropdown échouée : {e}", flush=True)
-        return ""
+        print(f"[WARN] Chargement horaire échoué : {e}", flush=True)
+        return driver.page_source if driver else ""
     finally:
         driver.quit()
 
 # ===============================================================
-# 🏒 Extraction des matchs et filtrage dernier / prochain
+# 🏒 Extraction des matchs
 # ===============================================================
-def get_games_from_schedule(base_url_ref: str, league_id: str, schedule_id: str, team_name: str, periode="30 derniers jours"):
-    url_schedule = build_spordle_url(base_url_ref, league_id, schedule_id, "schedule")
+def get_games_from_schedule(spordle_team_url: str, team_name: str, periode="30 derniers jours"):
+    url_schedule = build_team_tab_url(spordle_team_url, "schedule")
     html = get_schedule_html_interactive(url_schedule, filtre=periode)
     if not html:
         return []
@@ -252,14 +242,12 @@ def get_games_from_schedule(base_url_ref: str, league_id: str, schedule_id: str,
             final = "FINAL" in event.get_text()
             arena_el = event.find("a", href=re.compile("maps/search"))
             arena = arena_el.get_text(strip=True) if arena_el else ""
-            print(f"[DEBUG] Match détecté: {date_text} | {teams} | scores={scores} | final={final}", flush=True)
 
             if not teams:
                 continue
 
             joined = normalize("".join(teams))
-            involving_team = normalized_team in joined
-            if not involving_team:
+            if normalized_team not in joined:
                 continue
 
             match = {
@@ -273,7 +261,6 @@ def get_games_from_schedule(base_url_ref: str, league_id: str, schedule_id: str,
             }
             all_matches.append(match)
 
-    print(f"[DEBUG] Total {len(all_matches)} matchs trouvés pour {team_name}.", flush=True)
     return all_matches
 
 # ===============================================================
@@ -321,7 +308,7 @@ def main():
             print(f"   → {p.get('player_name','?')} ({p.get('team_name','?')})", flush=True)
 
     if not teams:
-        print("[ERREUR] Aucune catégorie configurée.", flush=True)
+        print("[ERREUR] Aucune équipe configurée.", flush=True)
         return
 
     client = mqtt.Client(client_id=f"slqne_hockey_{int(time.time())}")
@@ -333,50 +320,37 @@ def main():
 
     if players:
         for player in players:
-            player_name = player.get("player_name", "").strip()
+            player_name = clean_name(player.get("player_name", "").strip())
             team_name = player.get("team_name", "").strip()
-            player_name = clean_name(player_name)
             slug = slugify(player_name)
 
             print(f"[INFO] --- Publication joueur {player_name} ({team_name}) ---", flush=True)
 
             team_info = next((t for t in teams if normalize(t.get("name")) in normalize(team_name) or normalize(team_name) in normalize(t.get("name"))), None)
 
-            player_league_id = player.get("league_id") or player.get("league_uuid") or player.get("leagueId") or player.get("league")
-            player_schedule_id = player.get("schedule_id") or player.get("scheduleId") or player.get("schedule")
-
-            if not team_info and not (player_league_id and player_schedule_id):
-                print(f"[WARN] Aucune équipe trouvée pour {team_name} et aucun ID propre au joueur.", flush=True)
+            if not team_info:
+                print(f"[WARN] Aucune URL d'équipe trouvée dans la config pour {team_name}.", flush=True)
                 continue
 
-            league_id = player_league_id or (team_info.get("league_id") if team_info else None)
-            schedule_id = player_schedule_id or (team_info.get("schedule_id") if team_info else None)
-            spordle_url_ref = team_info.get("spordle_url", "https://page.spordle.com") if team_info else "https://page.spordle.com"
-
-            if not league_id or not schedule_id:
-                print(f"[WARN] IDs manquants pour {player_name}. Saut.", flush=True)
-                continue
-
-            src = "player" if (player_league_id or player_schedule_id) else "team_map"
-            print(f"[CTX] {player_name} → league_id={league_id} schedule_id={schedule_id} (src={src})", flush=True)
+            spordle_team_url = team_info.get("spordle_url", "")
 
             try:
                 # 1. Classement
-                url_standings = build_spordle_url(spordle_url_ref, league_id, schedule_id, "standings")
+                url_standings = build_team_tab_url(spordle_team_url, "standings")
                 html_standings = get_html_selenium(url_standings)
                 standings = parse_standings_multi_division(html_standings)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
                              f"{len(standings)} équipes", {"standings": standings, "updated": now_local_iso()})
 
-                # 2. Stats Joueurs
-                url_players = build_spordle_url(spordle_url_ref, league_id, schedule_id, "playerstats")
+                # 2. Stats Joueurs / Roster
+                url_players = build_team_tab_url(spordle_team_url, "playerstats")
                 html_players = get_html_selenium(url_players)
                 players_stats = parse_table_generic(html_players)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
                              f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
 
                 # 3. Dernier Match
-                matchs_passes = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, team_name, "30 derniers jours")
+                matchs_passes = get_games_from_schedule(spordle_team_url, team_name, "30 derniers jours")
                 if matchs_passes:
                     last = matchs_passes[-1]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
@@ -384,7 +358,7 @@ def main():
                                  {"match": last, "updated": now_local_iso()})
 
                 # 4. Prochain Match
-                matchs_futurs = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, team_name, "30 prochains jours")
+                matchs_futurs = get_games_from_schedule(spordle_team_url, team_name, "30 prochains jours")
                 if matchs_futurs:
                     next_match = matchs_futurs[0]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
@@ -395,37 +369,31 @@ def main():
     else:
         for team in teams:
             name = team.get("name")
-            league_id = team.get("league_id")
-            schedule_id = team.get("schedule_id")
-            spordle_url_ref = team.get("spordle_url", "https://page.spordle.com")
+            spordle_team_url = team.get("spordle_url", "")
             slug = slugify(name)
             print(f"[INFO] --- Traitement {name} ---", flush=True)
 
             try:
-                # 1. Classement
-                url_standings = build_spordle_url(spordle_url_ref, league_id, schedule_id, "standings")
+                url_standings = build_team_tab_url(spordle_team_url, "standings")
                 html_standings = get_html_selenium(url_standings)
                 standings = parse_standings_multi_division(html_standings)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "classement", "mdi:trophy",
                              f"{len(standings)} équipes", {"standings": standings, "updated": now_local_iso()})
 
-                # 2. Stats Joueurs
-                url_players = build_spordle_url(spordle_url_ref, league_id, schedule_id, "playerstats")
+                url_players = build_team_tab_url(spordle_team_url, "playerstats")
                 html_players = get_html_selenium(url_players)
                 players_stats = parse_table_generic(html_players)
                 mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "stats_joueurs", "mdi:hockey-sticks",
                              f"{len(players_stats)} joueurs", {"players": players_stats, "updated": now_local_iso()})
 
-                # 3. Dernier Match
-                matchs_passes = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, name, "30 derniers jours")
+                matchs_passes = get_games_from_schedule(spordle_team_url, name, "30 derniers jours")
                 if matchs_passes:
                     last = matchs_passes[-1]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "dernier_match", "mdi:hockey-puck",
                                  f"{last['score_home']}-{last['score_visitor']}",
                                  {"match": last, "updated": now_local_iso()})
 
-                # 4. Prochain Match
-                matchs_futurs = get_games_from_schedule(spordle_url_ref, league_id, schedule_id, name, "30 prochains jours")
+                matchs_futurs = get_games_from_schedule(spordle_team_url, name, "30 prochains jours")
                 if matchs_futurs:
                     next_match = matchs_futurs[0]
                     mqtt_publish(client, args.discovery_prefix, args.entity_prefix, slug, "prochain_match", "mdi:calendar-clock",
