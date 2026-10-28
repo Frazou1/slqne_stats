@@ -44,11 +44,8 @@ if [[ "$TEAMS_JSON" == "[]" ]]; then
   echo "[ERREUR] Aucune équipe configurée."
   echo "→ Exemple attendu dans la configuration :"
   echo "teams:"
-  echo "  - name: joueur1 Hockey"
-  echo "    spordle_url: https://page.spordle.com/..."
-  echo "  - name: joueur2 Hockey"
-  echo "    league_id: 00000000-0000-0000-0000-000000000001"
-  echo "    schedule_id: 000003"
+  echo "  - name: Mon équipe"
+  echo "    spordle_url: https://page.spordle.com/<ligue>/teams/<identifiant>"
   exit 1
 fi
 

@@ -16,17 +16,10 @@ map:
 options:
   entity_prefix: "slqne"
   teams:
-    - name: "joueur1 Hockey"
-      spordle_url: "https://page.spordle.com/fr/ligue-hockey-mineur-capitale-nationale/classement/000002?organizationId=00000000-0000-0000-0000-000000000002"
-    - name: "joueur2 Hockey"
-      league_id: "00000000-0000-0000-0000-000000000001"
-      schedule_id: "000003"
+    - name: "Mon équipe"
+      spordle_url: "https://page.spordle.com/<ligue>/teams/<identifiant>"
 
-  players:
-    - player_name: "joueur1 Joueur"
-      team_name: "joueur1 Hockey"
-    - player_name: "joueur2 Joueur"
-      team_name: "joueur2 Hockey"
+  players: []
 
   update_interval: 7200
   mqtt_host: "core-mosquitto"
